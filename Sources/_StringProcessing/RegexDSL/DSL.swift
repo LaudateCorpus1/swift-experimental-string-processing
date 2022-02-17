@@ -14,7 +14,15 @@ import _MatchingEngine
 // MARK: - Primitives
 
 extension String: RegexProtocol {
-  public typealias Capture = EmptyCapture
+  public typealias Match = Substring
+
+  public var regex: Regex<Match> {
+    let atoms = self.map { atom(.char($0)) }
+    return .init(ast: concat(atoms))
+  }
+}
+
+extension Substring: RegexProtocol {
   public typealias Match = Substring
 
   public var regex: Regex<Match> {
@@ -24,7 +32,6 @@ extension String: RegexProtocol {
 }
 
 extension Character: RegexProtocol {
-  public typealias Capture = EmptyCapture
   public typealias Match = Substring
 
   public var regex: Regex<Match> {
@@ -33,7 +40,6 @@ extension Character: RegexProtocol {
 }
 
 extension CharacterClass: RegexProtocol {
-  public typealias Capture = EmptyCapture
   public typealias Match = Substring
 
   public var regex: Regex<Match> {
@@ -46,171 +52,135 @@ extension CharacterClass: RegexProtocol {
 
 // MARK: - Combinators
 
-// TODO: We want variadic generics!
-// Overloads are auto-generated in Concatenation.swift.
-//
-// public struct Concatenate<R...: RegexContent>: RegexContent {
-//   public let regex: Regex<(R...).filter { $0 != Void.self }>
-//
-//   public init(_ components: R...) {
-//     regex = .init(ast: .concatenation([#splat(components...)]))
+// MARK: Concatenation
+
+// Note: Concatenation overloads are currently gyb'd.
+
+// TODO: Variadic generics
+// struct Concatenation<W0, C0..., R0: RegexProtocol, W1, C1..., R1: RegexProtocol>
+// where R0.Match == (W0, C0...), R1.Match == (W1, C1...)
+// {
+//   typealias Match = (Substring, C0..., C1...)
+//   let regex: Regex<Match>
+//   init(_ first: R0, _ second: R1) {
+//     regex = .init(concat(r0, r1))
 //   }
 // }
 
-// MARK: Repetition
+// MARK: Quantification
 
-/// A regular expression.
-public struct OneOrMore<Component: RegexProtocol>: RegexProtocolWithComponent {
-  public typealias Match = Tuple2<Substring, [Component.Match.Capture]>
+// Note: Quantifiers are currently gyb'd.
 
-  public let regex: Regex<Match>
-
-  public init(component: Component) {
-    self.regex = .init(node: .quantification(
-      .oneOrMore, .eager, component.regex.root)
-    )
+/// Specifies how much to attempt to match when using a quantifier.
+public struct QuantificationBehavior {
+  internal enum Kind {
+    case eagerly
+    case reluctantly
+    case possessively
   }
-
-  public init(@RegexBuilder _ content: () -> Component) {
-    self.init(content())
-  }
-}
-
-postfix operator .+
-
-public postfix func .+ <R: RegexProtocol>(
-  lhs: R
-) -> OneOrMore<R> {
-  .init(lhs)
-}
-
-public struct Repeat<
-  Component: RegexProtocol
->: RegexProtocolWithComponent {
-  public typealias Match = Tuple2<Substring, [Component.Match.Capture]>
-
-  public let regex: Regex<Match>
-
-  public init(component: Component) {
-    self.regex = .init(node: .quantification(
-      .zeroOrMore, .eager, component.regex.root))
-  }
-
-  public init(@RegexBuilder _ content: () -> Component) {
-    self.init(content())
+  
+  var kind: Kind
+  
+  internal var astKind: AST.Quantification.Kind {
+    switch kind {
+    case .eagerly: return .eager
+    case .reluctantly: return .reluctant
+    case .possessively: return .possessive
+    }
   }
 }
 
-postfix operator .*
-
-public postfix func .* <R: RegexProtocol>(
-  lhs: R
-) -> Repeat<R> {
-  .init(lhs)
-}
-
-public struct Optionally<Component: RegexProtocol>: RegexProtocolWithComponent {
-  public typealias Match = Tuple2<Substring, Component.Match.Capture?>
-
-  public let regex: Regex<Match>
-
-  public init(component: Component) {
-    self.regex = .init(node: .quantification(
-      .zeroOrOne, .eager, component.regex.root))
+extension QuantificationBehavior {
+  /// Match as much of the input string as possible, backtracking when
+  /// necessary.
+  public static var eagerly: QuantificationBehavior {
+    .init(kind: .eagerly)
   }
-
-  public init(@RegexBuilder _ content: () -> Component) {
-    self.init(content())
+  
+  /// Match as little of the input string as possible, expanding the matched
+  /// region as necessary to complete a match.
+  public static var reluctantly: QuantificationBehavior {
+    .init(kind: .reluctantly)
+  }
+  
+  /// Match as much of the input string as possible, performing no backtracking.
+  public static var possessively: QuantificationBehavior {
+    .init(kind: .possessively)
   }
 }
+
+// TODO: Variadic generics
+// struct _OneOrMore<W, C..., Component: RegexProtocol>
+// where R.Match == (W, C...)
+// {
+//   typealias Match = (Substring, [(C...)])
+//   let regex: Regex<Match>
+//   init(_ component: Component) {
+//     regex = .init(oneOrMore(r0))
+//   }
+// }
+//
+// struct _OneOrMoreNonCapturing<Component: RegexProtocol> {
+//   typealias Match = Substring
+//   let regex: Regex<Match>
+//   init(_ component: Component) {
+//     regex = .init(oneOrMore(r0))
+//   }
+// }
+//
+// func oneOrMore<W, C..., Component: RegexProtocol>(
+//   _ component: Component
+// ) -> <R: RegexProtocol where R.Match == (Substring, [(C...)])> R {
+//   _OneOrMore(component)
+// }
+//
+// @_disfavoredOverload
+// func oneOrMore<Component: RegexProtocol>(
+//   _ component: Component
+// ) -> <R: RegexProtocol where R.Match == Substring> R {
+//   _OneOrMoreNonCapturing(component)
+// }
 
 postfix operator .?
+postfix operator .*
+postfix operator .+
 
-public postfix func .? <R: RegexProtocol>(
-  lhs: R
-) -> Optionally<R> {
-  .init(lhs)
+// MARK: Alternation
+
+// TODO: Variadic generics
+// @resultBuilder
+// struct AlternationBuilder {
+//   @_disfavoredOverload
+//   func buildBlock<R: RegexProtocol>(_ regex: R) -> R
+//   func buildBlock<
+//     R: RegexProtocol, W0, C0...
+//   >(
+//     _ regex: R
+//   ) -> R where R.Match == (W, C...)
+// }
+
+@resultBuilder
+public struct AlternationBuilder {
+  @_disfavoredOverload
+  public static func buildBlock<R: RegexProtocol>(_ regex: R) -> R {
+    regex
+  }
+
+  public static func buildExpression<R: RegexProtocol>(_ regex: R) -> R {
+    regex
+  }
+
+  public static func buildEither<R: RegexProtocol>(first component: R) -> R {
+    component
+  }
+
+  public static func buildEither<R: RegexProtocol>(second component: R) -> R {
+    component
+  }
 }
 
-// TODO: Support heterogeneous capture alternation.
-public struct Alternation<
-  Component1: RegexProtocol, Component2: RegexProtocol
->: RegexProtocol where Component1.Match.Capture == Component2.Match.Capture {
-  public typealias Match = Tuple2<Substring, Component1.Match.Capture>
-
-  public let regex: Regex<Match>
-
-  public init(_ first: Component1, _ second: Component2) {
-    regex = .init(node: .alternation([
-      first.regex.root, second.regex.root
-    ]))
-  }
-
-  public init(
-    @RegexBuilder _ content: () -> Alternation<Component1, Component2>
-  ) {
-    self = content()
-  }
-}
-
-public func | <Component1, Component2>(
-  lhs: Component1, rhs: Component2
-) -> Alternation<Component1, Component2> {
-  .init(lhs, rhs)
-}
-
-// MARK: - Capture
-
-public struct CapturingGroup<Match: MatchProtocol>: RegexProtocol {
-  public let regex: Regex<Match>
-
-  init<Component: RegexProtocol>(
-    _ component: Component
-  ) {
-    self.regex = .init(node: .group(
-      .capture, component.regex.root))
-  }
-
-  init<Component: RegexProtocol>(
-    _ component: Component,
-    transform: CaptureTransform
-  ) {
-    self.regex = .init(node: .groupTransform(
-      .capture,
-      component.regex.root,
-      transform))
-  }
-
-  init<NewCapture, Component: RegexProtocol>(
-    _ component: Component,
-    transform: @escaping (Substring) -> NewCapture
-  ) {
-    self.init(
-      component,
-      transform: CaptureTransform(resultType: NewCapture.self) {
-        transform($0) as Any
-      })
-  }
-
-  init<NewCapture, Component: RegexProtocol>(
-    _ component: Component,
-    transform: @escaping (Substring) throws -> NewCapture
-  ) {
-    self.init(
-      component,
-      transform: CaptureTransform(resultType: NewCapture.self) {
-        try transform($0) as Any
-      })
-  }
-
-  init<NewCapture, Component: RegexProtocol>(
-    _ component: Component,
-    transform: @escaping (Substring) -> NewCapture?
-  ) {
-    self.init(
-      component,
-      transform: CaptureTransform(resultType: NewCapture.self) {
-        transform($0) as Any?
-      })
-  }
+public func choiceOf<R: RegexProtocol>(
+  @AlternationBuilder builder: () -> R
+) -> R {
+  builder()
 }

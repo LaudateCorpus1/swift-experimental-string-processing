@@ -3,11 +3,12 @@ import _MatchingEngine
 extension Compiler {
   struct ByteCodeGen {
     var options: MatchingOptions
-    var builder = _MatchingEngine.Program<String>.Builder()
+    var builder = Program.Builder()
 
-    mutating func finish() -> _MatchingEngine.Program<String> {
+    mutating func finish(
+    ) throws -> Program {
       builder.buildAccept()
-      return builder.assemble()
+      return try builder.assemble()
     }
   }
 }
@@ -90,7 +91,7 @@ extension Compiler.ByteCodeGen {
 
     case .resetStartOfMatch:
       // FIXME: Figure out how to communicate this out
-      throw unsupported(#"\K (reset/keep assertion)"#)
+      throw Unsupported(#"\K (reset/keep assertion)"#)
 
     case .firstMatchingPositionInSubject:
       // TODO: We can probably build a nice model with API here
@@ -100,11 +101,11 @@ extension Compiler.ByteCodeGen {
 
     case .textSegment:
       // This we should be able to do!
-      throw unsupported(#"\y (text segment)"#)
+      throw Unsupported(#"\y (text segment)"#)
 
     case .notTextSegment:
       // This we should be able to do!
-      throw unsupported(#"\Y (not text segment)"#)
+      throw Unsupported(#"\Y (not text segment)"#)
 
     case .startOfLine:
       builder.buildAssert { (input, pos, bounds) in
@@ -204,7 +205,7 @@ extension Compiler.ByteCodeGen {
     _ child: DSLTree.Node
   ) throws {
     guard kind.forwards else {
-      throw unsupported("backwards assertions")
+      throw Unsupported("backwards assertions")
     }
 
     let positive = kind.positive
@@ -247,33 +248,36 @@ extension Compiler.ByteCodeGen {
 
   mutating func emitGroup(
     _ kind: AST.Group.Kind, _ child: DSLTree.Node
-  ) throws {
+  ) throws -> CaptureRegister? {
     options.beginScope()
     defer { options.endScope() }
 
     if let lookaround = kind.lookaroundKind {
       try emitLookaround(lookaround, child)
-      return
+      return nil
     }
 
     switch kind {
     case .lookahead, .negativeLookahead,
         .lookbehind, .negativeLookbehind:
-      fatalError("unreachable")
+      throw Unreachable("TODO: reason")
 
     case .capture, .namedCapture:
       let cap = builder.makeCapture()
       builder.buildBeginCapture(cap)
       try emitNode(child)
       builder.buildEndCapture(cap)
+      return cap
 
     case .changeMatchingOptions(let optionSequence, _):
       options.apply(optionSequence)
       try emitNode(child)
+      return nil
 
     default:
       // FIXME: Other kinds...
       try emitNode(child)
+      return nil
     }
   }
 
@@ -299,7 +303,7 @@ extension Compiler.ByteCodeGen {
       // Ok
       break
     default:
-      fatalError("unreachable?")
+      throw Unreachable("TODO: reason")
     }
 
     // Compiler and/or parser should enforce these invariants
@@ -493,7 +497,7 @@ extension Compiler.ByteCodeGen {
       }
 
     case let .group(kind, child):
-      try emitGroup(kind, child)
+      _ = try emitGroup(kind, child)
 
     case .conditional:
       throw Unsupported("Conditionals")
@@ -517,9 +521,21 @@ extension Compiler.ByteCodeGen {
     case let .convertedRegexLiteral(n, _):
       try emitNode(n)
 
-    case let .groupTransform(kind, child, _):
-      try emitGroup(kind, child)
-      // FIXME: Transforms
+    case let .groupTransform(kind, child, t):
+      guard let cap = try emitGroup(kind, child) else {
+        assertionFailure("""
+          What does it mean to not have a capture to transform?
+          """)
+        return
+      }
+
+      // FIXME: Is this how we want to do it?
+      let transform = builder.makeTransformFunction {
+        input, range in
+        t(input[range])
+      }
+
+      builder.buildTransformCapture(cap, transform)
 
     case .absentFunction:
       throw Unsupported("absent function")

@@ -250,14 +250,14 @@ extension RegexTests {
       concat(
         zeroOrMore(of: capture(atom(.any))),
         capture(zeroOrMore(of: atom(.any)))),
-      captures: .tuple([.array(.atom()), .atom()]))
+      captures: .tuple([.optional(.atom()), .atom()]))
     parseTest(
       "((.))*((.)?)",
       concat(
         zeroOrMore(of: capture(capture(atom(.any)))),
         capture(zeroOrOne(of: capture(atom(.any))))),
       captures: .tuple([
-        .array(.atom()), .array(.atom()), .atom(), .optional(.atom())
+        .optional(.atom()), .optional(.atom()), .atom(), .optional(.atom())
       ]))
     parseTest(
       #"abc\d"#,
@@ -289,7 +289,7 @@ extension RegexTests {
       concat(quant(
         .zeroOrMore, .reluctant,
         nonCapture(capture(capture(alt("a", "b"))))), "c"),
-      captures: .tuple(.array(.atom()), .array(.atom())))
+      captures: .tuple(.optional(.atom()), .optional(.atom())))
     parseTest(
       "(a)|b|(c)d",
       alt(capture("a"), "b", concat(capture("c"), "d")),
@@ -1138,7 +1138,7 @@ extension RegexTests {
       trueBranch: oneOrMore(of: capture("a")),
       falseBranch: "b"
     ), captures: .tuple([
-      .atom(), .optional(.atom()), .atom(), .optional(.array(.atom()))
+      .atom(), .optional(.atom()), .atom(), .optional(.atom())
     ]))
 
     parseTest(#"(?(?:(a)?(b))(a)+|b)"#, conditional(
@@ -1148,7 +1148,7 @@ extension RegexTests {
       trueBranch: oneOrMore(of: capture("a")),
       falseBranch: "b"
     ), captures: .tuple([
-      .optional(.atom()), .atom(), .optional(.array(.atom()))
+      .optional(.atom()), .atom(), .optional(.atom())
     ]))
 
     parseTest(#"(?<xxx>y)(?(xxx)a|b)"#, concat(
@@ -1436,31 +1436,33 @@ extension RegexTests {
 
     // MARK: Parse with delimiters
 
-    parseWithDelimitersTest("'/a b/'", concat("a", " ", "b"))
-    parseWithDelimitersTest("'|a b|'", concat("a", "b"))
+    parseWithDelimitersTest("#/a b/#", concat("a", " ", "b"))
+    parseWithDelimitersTest("#|a b|#", concat("a", "b"))
 
-    parseWithDelimitersTest("'|[a b]|'", charClass("a", "b"))
+    parseWithDelimitersTest("#|[a b]|#", charClass("a", "b"))
     parseWithDelimitersTest(
-      "'|(?-x)[a b]|'", changeMatchingOptions(
+      "#|(?-x)[a b]|#", changeMatchingOptions(
         matchingOptions(removing: .extended), isIsolated: true,
         charClass("a", " ", "b"))
     )
-    parseWithDelimitersTest("'|[[a ] b]|'", charClass(charClass("a"), "b"))
+    parseWithDelimitersTest("#|[[a ] b]|#", charClass(charClass("a"), "b"))
 
     // Non-semantic whitespace between quantifier characters for consistency
     // with PCRE.
-    parseWithDelimitersTest("'|a * ?|'", zeroOrMore(.reluctant, of: "a"))
+    parseWithDelimitersTest("#|a * ?|#", zeroOrMore(.reluctant, of: "a"))
 
     // End-of-line comments aren't enabled by default in experimental syntax.
-    parseWithDelimitersTest("'|#abc|'", concat("#", "a", "b", "c"))
-    parseWithDelimitersTest("'|(?x)#abc|'", changeMatchingOptions(
+    parseWithDelimitersTest("#|#abc|#", concat("#", "a", "b", "c"))
+    parseWithDelimitersTest("#|(?x)#abc|#", changeMatchingOptions(
       matchingOptions(adding: .extended), isIsolated: true,
       empty())
     )
 
-    parseWithDelimitersTest("'|||'", alt(empty(), empty()))
-    parseWithDelimitersTest("'||||'", alt(empty(), empty(), empty()))
-    parseWithDelimitersTest("'|a||'", alt("a", empty()))
+    parseWithDelimitersTest("#|||#", alt(empty(), empty()))
+    parseWithDelimitersTest("#||||#", alt(empty(), empty(), empty()))
+    parseWithDelimitersTest("#|a||#", alt("a", empty()))
+
+    parseWithDelimitersTest("re'x*'", zeroOrMore(of: "x"))
 
     // MARK: Parse not-equal
 
@@ -1878,6 +1880,6 @@ extension RegexTests {
 
   func testlibswiftDiagnostics() {
     libswiftDiagnosticMessageTest(
-      "'/[x*/'", "cannot parse regular expression: expected ']'")
+      "#/[x*/#", "cannot parse regular expression: expected ']'")
   }
 }

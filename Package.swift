@@ -16,9 +16,6 @@ let package = Package(
         .library(
             name: "_MatchingEngine",
             targets: ["_MatchingEngine"]),
-        .library(
-            name: "_Unicode",
-            targets: ["_Unicode"]),
         .executable(
             name: "VariadicsGenerator",
             targets: ["VariadicsGenerator"])
@@ -31,31 +28,33 @@ let package = Package(
         // Targets can depend on other targets in this package, and on products in packages which this package depends on.
         .target(
             name: "_MatchingEngine",
-            dependencies: [/*"_Unicode"*/],
+            dependencies: [],
             swiftSettings: [
                 .unsafeFlags(["-enable-library-evolution"])
             ]),
         .testTarget(
             name: "MatchingEngineTests",
-            dependencies: ["_MatchingEngine"]),
+            dependencies: [
+              "_MatchingEngine", "_StringProcessing"]),
+        .target(
+            name: "_CUnicode",
+            dependencies: []),
         .target(
             name: "_StringProcessing",
-            dependencies: ["_MatchingEngine"],
+            dependencies: ["_MatchingEngine", "_CUnicode"],
             swiftSettings: [
-                .unsafeFlags(["-enable-library-evolution"])
+                .unsafeFlags(["-enable-library-evolution"]),
+                .unsafeFlags(["-Xfrontend", "-enable-experimental-pairwise-build-block"])
             ]),
-        .target(
-            name: "_Unicode",
-            dependencies: []),
         .testTarget(
             name: "RegexTests",
-            dependencies: ["_StringProcessing"]),
+            dependencies: ["_StringProcessing"],
+            swiftSettings: [
+                .unsafeFlags(["-Xfrontend", "-enable-experimental-pairwise-build-block"])
+            ]),
         .target(
             name: "Prototypes",
-            dependencies: ["_MatchingEngine"]),
-        .testTarget(
-          name: "UnicodeTests",
-          dependencies: ["_Unicode"]),
+            dependencies: ["_MatchingEngine", "_StringProcessing"]),
 
         // MARK: Scripts
         .executableTarget(
@@ -74,7 +73,10 @@ let package = Package(
         // MARK: Exercises
         .target(
           name: "Exercises",
-          dependencies: ["_MatchingEngine", "Prototypes", "_StringProcessing"]),
+          dependencies: ["_MatchingEngine", "Prototypes", "_StringProcessing"],
+          swiftSettings: [
+              .unsafeFlags(["-Xfrontend", "-enable-experimental-pairwise-build-block"])
+          ]),
         .testTarget(
           name: "ExercisesTests",
           dependencies: ["Exercises"]),

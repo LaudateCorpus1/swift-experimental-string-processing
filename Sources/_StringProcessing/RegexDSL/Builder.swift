@@ -11,21 +11,20 @@
 
 @resultBuilder
 public enum RegexBuilder {
+  @_disfavoredOverload
   public static func buildBlock<R0: RegexProtocol>(_ r0: R0) -> R0 {
     r0
   }
-  
+
+  public static func buildExpression<R: RegexProtocol>(_ regex: R) -> R {
+    regex
+  }
+
   public static func buildEither<R: RegexProtocol>(first component: R) -> R {
     component
   }
 
   public static func buildEither<R: RegexProtocol>(second component: R) -> R {
     component
-  }
-
-  public static func buildLimitedAvailability<R: RegexProtocol>(
-    _ component: R
-  ) -> Optionally<R> {
-    .init(component)
   }
 }

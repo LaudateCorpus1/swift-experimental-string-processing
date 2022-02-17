@@ -51,7 +51,7 @@ func compile(
         instructions.append(.any)
         return
       default:
-        throw unsupported("Unsupported: \(a)")
+        throw Unsupported("Unsupported: \(a)")
       }
 
     case let .group(kind, child):
@@ -68,7 +68,7 @@ func compile(
         return
 
       default:
-        throw unsupported("Unsupported group \(kind)")
+        throw Unsupported("Unsupported group \(kind)")
       }
 
     case let .groupTransform(kind, child, transform) where kind == .capture:
@@ -78,7 +78,8 @@ func compile(
       return
 
     case let .groupTransform(kind, _, _):
-      throw unsupported("Unsupported group transform \(kind)")
+      throw Unsupported(
+        "Unsupported group transform \(kind)")
 
     case let .concatenation(children):
       let childrenHaveCaptures = children.any(\.hasCapture)
@@ -107,7 +108,10 @@ func compile(
         instructions.append(.goto(label: start.label!))
         instructions.append(done)
         if childHasCaptures {
-          instructions.append(.captureArray(childType: child.captureStructure.type))
+          var constructor = CaptureStructure.Constructor(
+            .flatten)
+          let type = child._captureStructure(&constructor).type
+          instructions.append(.captureArray(childType: type))
           instructions.append(.endGroup)
         }
         return
@@ -130,7 +134,10 @@ func compile(
         instructions.append(.goto(label: start.label!))
         instructions.append(done)
         if childHasCaptures {
-          instructions.append(.captureArray(childType: child.captureStructure.type))
+          var constructor = CaptureStructure.Constructor(
+            .flatten)
+          let type = child._captureStructure(&constructor).type
+          instructions.append(.captureArray(childType: type))
           instructions.append(.endGroup)
         }
         return
@@ -143,11 +150,16 @@ func compile(
           let done = createLabel()
           instructions.append(.split(disfavoring: nilCase.label!))
           try compileNode(child)
+
+          var constructor = CaptureStructure.Constructor(
+            .flatten)
+          let type = child._captureStructure(&constructor).type
+
           instructions += [
             .captureSome,
             .goto(label: done.label!),
             nilCase,
-            .captureNil(childType: child.captureStructure.type),
+            .captureNil(childType: type),
             done,
             .endGroup
           ]
@@ -169,12 +181,18 @@ func compile(
           instructions.append(.split(disfavoring: element.label!))
           instructions.append(.goto(label: nilCase.label!))
           instructions.append(element)
+
           try compileNode(child)
+
+          var constructor = CaptureStructure.Constructor(
+            .flatten)
+          let type = child._captureStructure(&constructor).type
+
           instructions += [
             .captureSome,
             .goto(label: done.label!),
             nilCase,
-            .captureNil(childType: child.captureStructure.type),
+            .captureNil(childType: type),
             done,
             .endGroup
           ]
@@ -203,7 +221,10 @@ func compile(
         instructions.append(.goto(label: start.label!))
         instructions.append(done)
         if childHasCaptures {
-          instructions.append(.captureArray(childType: child.captureStructure.type))
+          var constructor = CaptureStructure.Constructor(
+            .flatten)
+          let type = child._captureStructure(&constructor).type
+          instructions.append(.captureArray(childType: type))
           instructions.append(.endGroup)
         }
         return
@@ -219,12 +240,16 @@ func compile(
         try compileNode(child)
         instructions.append(.split(disfavoring: start.label!))
         if childHasCaptures {
-          instructions.append(.captureArray(childType: child.captureStructure.type))
+          var constructor = CaptureStructure.Constructor(
+            .flatten)
+          let type = child._captureStructure(&constructor).type
+          instructions.append(.captureArray(childType: type))
           instructions.append(.endGroup)
         }
         return
       default:
-        throw unsupported("Unsupported: \((amount, kind))")
+        throw Unsupported(
+          "Unsupported: \((amount, kind))")
       }
 
     case let .alternation(children):
@@ -240,42 +265,80 @@ func compile(
       //       E.g. `a` falls-through to the rest of the program and the
       //       other cases branch back.
       //
-      assert(!children.isEmpty)
-      guard children.count > 1 else {
-        return try compileNode(children[0])
+      
+      // For every capturing child after the child at the given index, emit a
+      // nil capture. This is used for skipping the remaining alternation
+      // cases after a succesful match.
+      func nullifyRest(after index: Int) {
+        for child in children.suffix(from: index + 1) where child.hasCapture {
+          var constructor = CaptureStructure.Constructor(
+            .flatten)
+          let type = child._captureStructure(&constructor).type
+          instructions.append(contentsOf: [
+            .beginGroup,
+            .captureNil(childType: type),
+            .endGroup,
+          ])
+        }
       }
 
       let last = children.last!
       let middle = children.dropLast()
       let done = createLabel()
-      for child in middle {
+      for (childIndex, child) in middle.enumerated() {
         let nextLabel = createLabel()
+        if child.hasCapture {
+          instructions.append(.beginGroup)
+        }
         instructions.append(.split(disfavoring: nextLabel.label!))
         try compileNode(child)
-        instructions.append(.goto(label: done.label!))
-        instructions.append(nextLabel)
+        if child.hasCapture {
+          instructions.append(.captureSome)
+          instructions.append(.endGroup)
+        }
+        nullifyRest(after: childIndex)
+        instructions.append(contentsOf: [
+          .goto(label: done.label!),
+          nextLabel
+        ])
+        if child.hasCapture {
+          var constructor = CaptureStructure.Constructor(
+            .flatten)
+          let type = child._captureStructure(&constructor).type
+          instructions.append(contentsOf: [
+            .captureNil(childType: type),
+            .endGroup
+          ])
+        }
+      }
+      if last.hasCapture {
+        instructions.append(.beginGroup)
       }
       try compileNode(last)
+      if last.hasCapture {
+        instructions.append(.captureSome)
+        instructions.append(.endGroup)
+      }
       instructions.append(done)
       return
 
     case .conditional:
-      throw unsupported("Conditionals")
+      throw Unsupported("Conditionals")
 
     case .absentFunction:
-      throw unsupported("Absent functions")
+      throw Unsupported("Absent functions")
 
     case .customCharacterClass:
-      fatalError("unreachable")
+      throw Unreachable("TODO: reason")
 
     case let .atom(a) where a.characterClass != nil:
-      fatalError("unreachable")
+      throw Unreachable("TODO: reason")
 
     case let .convertedRegexLiteral(node, _):
       try compileNode(node)
 
     case .characterPredicate, .consumer, .consumerValidator:
-      throw unsupported("DSL extensions")
+      throw Unsupported("DSL extensions")
 
     case let .regexLiteral(re):
       try compileNode(re.dslTreeNode)

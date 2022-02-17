@@ -1022,7 +1022,7 @@ extension Source {
 
   /// Attempt to lex the start of a group conditional.
   ///
-  ///     GroupConditionalStart -> '(?' GroupStart
+  ///     GroupCondStart -> '(?' GroupStart
   ///
   mutating func lexGroupConditionalStart(
     context: ParsingContext
@@ -1785,7 +1785,7 @@ extension Source {
         if customCC {
           return .char(char)
         }
-        fatalError("unreachable")
+        throw Unreachable("TODO: reason")
 
       // (sometimes) special metacharacters
       case ".": return customCC ? .char(".") : .any

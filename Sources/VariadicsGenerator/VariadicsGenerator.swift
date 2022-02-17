@@ -9,63 +9,52 @@
 //
 //===----------------------------------------------------------------------===//
 
-// swift run VariadicsGenerator --max-arity 7 > Sources/_StringProcessing/RegexDSL/Concatenation.swift
+// swift run VariadicsGenerator --max-arity 10 > Sources/_StringProcessing/RegexDSL/Variadics.swift
 
 import ArgumentParser
+#if os(macOS)
+import Darwin
+#elseif os(Linux)
+import Glibc
+#elseif os(Windows)
+import CRT
+#endif
 
-struct Permutation {
-  let arity: Int
-  // 1 -> no extra constraint
-  // 0 -> where T.Match: NoCaptureProtocol
-  let bits: Int64
-
-  func isCaptureless(at index: Int) -> Bool {
-    bits & (1 << index) != 0
-  }
-
-  var hasCaptureless: Bool {
-    bits != 0
-  }
-
-  func hasCaptureless(beyond index: Int) -> Bool {
-    bits >> (index + 1) != 0
-  }
-
-  var identifier: String {
-    var result = ""
-    for i in 0..<arity {
-      result.append(isCaptureless(at: i) ? "V" : "T")
-    }
-    return String(result.reversed())
-  }
-
-  var capturelessIndices: [Int] {
-    (0..<arity).filter { isCaptureless(at: $0) }
-  }
-
-  var captureIndices: [Int] {
-    (0..<arity).filter { !isCaptureless(at: $0) }
-  }
-}
-
+// (T), (T)
+// (T), (T, T)
+// …
+// (T), (T, T, T, T, T, T, T)
+// (T, T), (T)
+// (T, T), (T, T)
+// …
+// (T, T), (T, T, T, T, T, T)
+// …
 struct Permutations: Sequence {
-  let arity: Int
+  let totalArity: Int
 
   struct Iterator: IteratorProtocol {
-    let arity: Int
-    var counter = Int64(0)
+    let totalArity: Int
+    var leftArity: Int = 0
+    var rightArity: Int = 0
 
-    mutating func next() -> Permutation? {
-      guard counter & (1 << arity) == 0 else {
+    mutating func next() -> (combinedArity: Int, nextArity: Int)? {
+      guard leftArity < totalArity else {
         return nil
       }
-      defer { counter += 1 }
-      return Permutation(arity: arity, bits: counter)
+      defer {
+        if leftArity + rightArity >= totalArity {
+          leftArity += 1
+          rightArity = 0
+        } else {
+          rightArity += 1
+        }
+      }
+      return (leftArity, rightArity)
     }
   }
 
   public func makeIterator() -> Iterator {
-    Iterator(arity: arity)
+    Iterator(totalArity: totalArity)
   }
 }
 
@@ -75,15 +64,15 @@ func output(_ content: String) {
 
 func outputForEach<C: Collection>(
   _ elements: C,
-  separator: String,
+  separator: String? = nil,
   lineTerminator: String? = nil,
   _ content: (C.Element) -> String
 ) {
   for i in elements.indices {
     output(content(elements[i]))
     let needsSep = elements.index(after: i) != elements.endIndex
-    if needsSep {
-      output(separator)
+    if needsSep, let sep = separator {
+      output(sep)
     }
     if let lt = lineTerminator {
       let indent = needsSep ? "      " : "    "
@@ -92,32 +81,45 @@ func outputForEach<C: Collection>(
   }
 }
 
+struct StandardErrorStream: TextOutputStream {
+  func write(_ string: String) {
+    fputs(string, stderr)
+  }
+}
+var standardError = StandardErrorStream()
+
 typealias Counter = Int64
-let patternProtocolName = "RegexProtocol"
+let regexProtocolName = "RegexProtocol"
 let concatenationStructTypeBaseName = "Concatenate"
 let capturingGroupTypeBaseName = "CapturingGroup"
 let matchAssociatedTypeName = "Match"
 let captureAssociatedTypeName = "Capture"
 let patternBuilderTypeName = "RegexBuilder"
 let patternProtocolRequirementName = "regex"
-let PatternTypeBaseName = "Regex"
-let emptyProtocolName = "EmptyCaptureProtocol"
+let regexTypeName = "Regex"
 let baseMatchTypeName = "Substring"
 
 @main
 struct VariadicsGenerator: ParsableCommand {
-  @Option(help: "The minimum arity of declarations to generate.")
-  var minArity: Int = 2
-
   @Option(help: "The maximum arity of declarations to generate.")
   var maxArity: Int
 
   func run() throws {
-    precondition(minArity > 0)
     precondition(maxArity > 1)
     precondition(maxArity < Counter.bitWidth)
 
     output("""
+      //===----------------------------------------------------------------------===//
+      //
+      // This source file is part of the Swift.org open source project
+      //
+      // Copyright (c) 2021-2022 Apple Inc. and the Swift project authors
+      // Licensed under Apache License v2.0 with Runtime Library Exception
+      //
+      // See https://swift.org/LICENSE.txt for license information
+      //
+      //===----------------------------------------------------------------------===//
+
       // BEGIN AUTO-GENERATED CONTENT
 
       import _MatchingEngine
@@ -125,152 +127,498 @@ struct VariadicsGenerator: ParsableCommand {
 
       """)
 
-    for arity in 2...maxArity+1 {
-      emitTupleStruct(arity: arity)
-    }
-
-    for arity in minArity...maxArity {
-      for permutation in Permutations(arity: arity) {
-        emitConcatenation(permutation: permutation)
+    print("Generating concatenation overloads...", to: &standardError)
+    for (leftArity, rightArity) in Permutations(totalArity: maxArity) {
+      guard rightArity != 0 else {
+        continue
       }
-      output("\n\n")
+      print(
+        "  Left arity: \(leftArity)  Right arity: \(rightArity)",
+        to: &standardError)
+      emitConcatenation(leftArity: leftArity, rightArity: rightArity)
     }
 
-    output("// END AUTO-GENERATED CONTENT")
+    for arity in 0..<maxArity {
+      emitConcatenationWithEmpty(leftArity: arity)
+    }
+
+    output("\n\n")
+
+    print("Generating quantifiers...", to: &standardError)
+    for arity in 0..<maxArity {
+      print("  Arity \(arity): ", terminator: "", to: &standardError)
+      for kind in QuantifierKind.allCases {
+        print("\(kind.rawValue) ", terminator: "", to: &standardError)
+        emitQuantifier(kind: kind, arity: arity)
+      }
+      print("repeating ", terminator: "", to: &standardError)
+      emitRepeating(arity: arity)
+      print(to: &standardError)
+    }
+
+    print("Generating alternation overloads...", to: &standardError)
+    for (leftArity, rightArity) in Permutations(totalArity: maxArity) {
+      print(
+        "  Left arity: \(leftArity)  Right arity: \(rightArity)",
+        to: &standardError)
+      emitAlternation(leftArity: leftArity, rightArity: rightArity)
+    }
+
+    print("Generating 'AlternationBuilder.buildBlock(_:)' overloads...", to: &standardError)
+    for arity in 1..<maxArity {
+      print("  Capture arity: \(arity)", to: &standardError)
+      emitUnaryAlternationBuildBlock(arity: arity)
+    }
+
+    print("Generating 'capture' and 'tryCapture' overloads...", to: &standardError)
+    for arity in 0..<maxArity {
+      print("  Capture arity: \(arity)", to: &standardError)
+      emitCapture(arity: arity)
+    }
+
+    output("\n\n")
+
+    output("// END AUTO-GENERATED CONTENT\n")
+
+    print("Done!", to: &standardError)
   }
 
-  func emitTupleStruct(arity: Int) {
-    output("""
-      @frozen @dynamicMemberLookup
-      public struct Tuple\(arity)<
-      """)
-    outputForEach(0..<arity, separator: ", ") {
-      "_\($0)"
+  func tupleType(arity: Int, genericParameters: () -> String) -> String {
+    assert(arity >= 0)
+    if arity == 0 {
+      return genericParameters()
     }
-    output("> {")
-    // `public typealias Tuple = (_0, ...)`
-    output("\n  public typealias Tuple = (")
-    outputForEach(0..<arity, separator: ", ") { "_\($0)" }
-    output(")")
-    // `public var tuple: Tuple`
-    output("\n  public var tuple: Tuple\n")
-    // `subscript(dynamicMember:)`
-    output("""
-        public subscript<T>(dynamicMember keyPath: WritableKeyPath<Tuple, T>) -> T {
-          get { tuple[keyPath: keyPath] }
-          _modify { yield &tuple[keyPath: keyPath] }
-        }
-      """)
-    output("\n}\n")
-    output("extension Tuple\(arity): \(emptyProtocolName) where ")
-    outputForEach(1..<arity, separator: ", ") {
-      "_\($0): \(emptyProtocolName)"
-    }
-    output(" {}\n")
-    output("extension Tuple\(arity): MatchProtocol {\n")
-    output("  public typealias Capture = ")
-    if arity == 2 {
-      output("_1")
-    } else {
-      output("Tuple\(arity-1)<")
-      outputForEach(1..<arity, separator: ", ") {
-        "_\($0)"
-      }
-      output(">")
-    }
-    output("\n  public init(_ tuple: Tuple) { self.tuple = tuple }")
-    // `public init(_0: _0, ...) { ... }`
-    output("\n  public init(")
-    outputForEach(0..<arity, separator: ", ") {
-      "_ _\($0): _\($0)"
-    }
-    output(") {\n")
-    output("    self.init((")
-    outputForEach(0..<arity, separator: ", ") { "_\($0)" }
-    output("))\n")
-    output("  }")
-    output("\n}\n")
-    // Equatable
-    output("extension Tuple\(arity): Equatable where ")
-    outputForEach(0..<arity, separator: ", ") {
-      "_\($0): Equatable"
-    }
-    output(" {\n")
-    output("  public static func == (lhs: Self, rhs: Self) -> Bool {\n")
-    output("    ")
-    outputForEach(0..<arity, separator: " && ") {
-      "lhs.tuple.\($0) == rhs.tuple.\($0)"
-    }
-    output("\n  }\n")
-    output("}\n")
+    return "(\(genericParameters()))"
   }
 
-  func emitConcatenation(permutation: Permutation) {
-    let arity = permutation.arity
+  func emitConcatenation(leftArity: Int, rightArity: Int) {
+    let genericParams: String = {
+      var result = "W0, W1"
+      result += (0..<leftArity+rightArity).map {
+        ", C\($0)"
+      }.joined()
+      result += ", R0: \(regexProtocolName), R1: \(regexProtocolName)"
+      return result
+    }()
 
-    func emitGenericParameters(withConstraints: Bool) {
-      outputForEach(0..<arity, separator: ", ") {
-        var base = "T\($0)"
-        if withConstraints {
-          base += ": \(patternProtocolName)"
+    // Emit concatenation type declaration.
+
+    let whereClause: String = {
+      var result = " where R0.Match == "
+      if leftArity == 0 {
+        result += "W0"
+      } else {
+        result += "(W0"
+        result += (0..<leftArity).map { ", C\($0)" }.joined()
+        result += ")"
+      }
+      result += ", R1.Match == "
+      if rightArity == 0 {
+        result += "W1"
+      } else {
+        result += "(W1"
+        result += (leftArity..<leftArity+rightArity).map { ", C\($0)" }.joined()
+        result += ")"
+      }
+      return result
+    }()
+
+    let matchType: String = {
+      if leftArity+rightArity == 0 {
+        return baseMatchTypeName
+      } else {
+        return "(\(baseMatchTypeName), "
+          + (0..<leftArity+rightArity).map { "C\($0)" }.joined(separator: ", ")
+          + ")"
+      }
+    }()
+
+    // Emit concatenation builder.
+    output("extension \(patternBuilderTypeName) {\n")
+    output("""
+        public static func buildBlock<\(genericParams)>(
+          combining next: R1, into combined: R0
+        ) -> \(regexTypeName)<\(matchType)> \(whereClause) {
+          .init(node: combined.regex.root.appending(next.regex.root))
         }
-        return base
       }
-    }
 
-    // Emit concatenation type declarations.
-    //   public struct Concatenation{n}_{perm}<...>: RegexProtocol {
-    //     public typealias Match = ...
-    //     public let regex: Regex<Match>
-    //     public init(...) { ... }
-    //   }
-    let typeName =
-      "\(concatenationStructTypeBaseName)\(arity)_\(permutation.identifier)"
-    output("public struct \(typeName)<\n  ")
-    emitGenericParameters(withConstraints: true)
-    output("\n>: \(patternProtocolName)")
-    if permutation.hasCaptureless {
-      output(" where ")
-      outputForEach(permutation.capturelessIndices, separator: ", ") {
-        "T\($0).\(matchAssociatedTypeName).\(captureAssociatedTypeName): \(emptyProtocolName)"
-      }
+      """)
+  }
+
+  func emitConcatenationWithEmpty(leftArity: Int) {
+    // T + () = T
+    output("""
+       extension RegexBuilder {
+         public static func buildBlock<W0
+       """)
+    outputForEach(0..<leftArity) {
+      ", C\($0)"
     }
-    output(" {\n")
-    let captureIndices = permutation.captureIndices
-    output("  public typealias \(matchAssociatedTypeName) = ")
-    let captureElements = captureIndices
-      .map { "T\($0).\(matchAssociatedTypeName).\(captureAssociatedTypeName)" }
-    if captureElements.isEmpty {
+    output("""
+      , R0: \(regexProtocolName), R1: \(regexProtocolName)>(
+          combining next: R1, into combined: R0
+        ) -> \(regexTypeName)<
+      """)
+    if leftArity == 0 {
       output(baseMatchTypeName)
     } else {
-      let count = captureElements.count + 1
-      output("Tuple\(count)<\(baseMatchTypeName), \(captureElements.joined(separator: ", "))>")
+      output("(\(baseMatchTypeName)")
+      outputForEach(0..<leftArity) {
+        ", C\($0)"
+      }
+      output(")")
     }
-    output("\n")
-    output("  public let \(patternProtocolRequirementName): \(PatternTypeBaseName)<\(matchAssociatedTypeName)>\n")
-    output("  init(")
-    outputForEach(0..<arity, separator: ", ") { "_ x\($0): T\($0)" }
-    output(") {\n")
-    output("    \(patternProtocolRequirementName) = .init(node: .concatenation([\n      ")
-    outputForEach(
-      0..<arity, separator: ", ", lineTerminator: ""
-    ) { i in
-      "x\(i).\(patternProtocolRequirementName).root"
+    output("> where R0.\(matchAssociatedTypeName) == ")
+    if leftArity == 0 {
+      output("W0")
+    } else {
+      output("(W0")
+      outputForEach(0..<leftArity) {
+        ", C\($0)"
+      }
+      output(")")
     }
-    output("]))\n")
-    output("  }\n}\n\n")
+    output("""
+        {
+          .init(node: combined.regex.root.appending(next.regex.root))
+        }
+      }
 
-    // Emit concatenation builders.
-    output("extension \(patternBuilderTypeName) {\n")
-    output("  public static func buildBlock<")
-    emitGenericParameters(withConstraints: true)
-    output(">(\n    ")
-    outputForEach(0..<arity, separator: ", ") { "_ x\($0): T\($0)" }
-    output("\n  ) -> \(typeName)<")
-    emitGenericParameters(withConstraints: false)
-    output("> {\n")
-    output("    \(typeName)(")
-    outputForEach(0..<arity, separator: ", ") { "x\($0)" }
-    output(")\n  }\n}\n\n")
+      """)
+  }
+
+  enum QuantifierKind: String, CaseIterable {
+    case zeroOrOne = "optionally"
+    case zeroOrMore = "zeroOrMore"
+    case oneOrMore = "oneOrMore"
+
+    var operatorName: String {
+      switch self {
+      case .zeroOrOne: return ".?"
+      case .zeroOrMore: return ".*"
+      case .oneOrMore: return ".+"
+      }
+    }
+
+    var astQuantifierAmount: String {
+      switch self {
+      case .zeroOrOne: return "zeroOrOne"
+      case .zeroOrMore: return "zeroOrMore"
+      case .oneOrMore: return "oneOrMore"
+      }
+    }
+  }
+  
+  struct QuantifierParameters {
+    var disfavored: String
+    var genericParams: String
+    var whereClause: String
+    var quantifiedCaptures: String
+    var matchType: String
+    
+    var repeatingWhereClause: String {
+      whereClause.isEmpty
+        ? "where R.Bound == Int"
+        : whereClause + ", R.Bound == Int"
+    }
+    
+    init(kind: QuantifierKind, arity: Int) {
+      self.disfavored = arity == 0 ? "@_disfavoredOverload\n" : ""
+      self.genericParams = {
+        var result = ""
+        if arity > 0 {
+          result += "W"
+          result += (0..<arity).map { ", C\($0)" }.joined()
+          result += ", "
+        }
+        result += "Component: \(regexProtocolName)"
+        return result
+      }()
+      
+      let captures = (0..<arity).map { "C\($0)" }
+      let capturesJoined = captures.joined(separator: ", ")
+      self.whereClause = arity == 0 ? "" :
+        "where Component.Match == (W, \(capturesJoined))"
+      self.quantifiedCaptures = {
+        switch kind {
+        case .zeroOrOne, .zeroOrMore:
+          return captures.map { "\($0)?" }.joined(separator: ", ")
+        case .oneOrMore:
+          return capturesJoined
+        }
+      }()
+      self.matchType = arity == 0
+        ? baseMatchTypeName
+        : "(\(baseMatchTypeName), \(quantifiedCaptures))"
+    }
+  }
+
+  func emitQuantifier(kind: QuantifierKind, arity: Int) {
+    assert(arity >= 0)
+    let params = QuantifierParameters(kind: kind, arity: arity)
+    output("""
+      \(params.disfavored)\
+      public func \(kind.rawValue)<\(params.genericParams)>(
+        _ component: Component,
+        _ behavior: QuantificationBehavior = .eagerly
+      ) -> \(regexTypeName)<\(params.matchType)> \(params.whereClause) {
+        .init(node: .quantification(.\(kind.astQuantifierAmount), behavior.astKind, component.regex.root))
+      }
+
+      \(params.disfavored)\
+      public func \(kind.rawValue)<\(params.genericParams)>(
+        _ behavior: QuantificationBehavior = .eagerly,
+        @RegexBuilder _ component: () -> Component
+      ) -> \(regexTypeName)<\(params.matchType)> \(params.whereClause) {
+        .init(node: .quantification(.\(kind.astQuantifierAmount), behavior.astKind, component().regex.root))
+      }
+
+      \(params.disfavored)\
+      public postfix func \(kind.operatorName)<\(params.genericParams)>(
+        _ component: Component
+      ) -> \(regexTypeName)<\(params.matchType)> \(params.whereClause) {
+        .init(node: .quantification(.\(kind.astQuantifierAmount), .eager, component.regex.root))
+      }
+
+      \(kind == .zeroOrOne ?
+        """
+        extension RegexBuilder {
+          public static func buildLimitedAvailability<\(params.genericParams)>(
+            _ component: Component
+          ) -> \(regexTypeName)<\(params.matchType)> \(params.whereClause) {
+            .init(node: .quantification(.\(kind.astQuantifierAmount), .eager, component.regex.root))
+          }
+        }
+        """ : "")
+
+      """)
+  }
+  
+  func emitRepeating(arity: Int) {
+    assert(arity >= 0)
+    // `repeat(..<5)` has the same generic semantics as zeroOrMore
+    let params = QuantifierParameters(kind: .zeroOrMore, arity: arity)
+    // TODO: Could `repeat(count:)` have the same generic semantics as oneOrMore?
+    // We would need to prohibit `repeat(count: 0)`; can only happen at runtime
+    
+    output("""
+      \(params.disfavored)\
+      public func repeating<\(params.genericParams)>(
+        _ component: Component,
+        count: Int
+      ) -> \(regexTypeName)<\(params.matchType)> \(params.whereClause) {
+        assert(count > 0, "Must specify a positive count")
+        // TODO: Emit a warning about `repeatMatch(count: 0)` or `repeatMatch(count: 1)`
+        return Regex(node: .quantification(.exactly(.init(faking: count)), .eager, component.regex.root))
+      }
+
+      \(params.disfavored)\
+      public func repeating<\(params.genericParams)>(
+        count: Int,
+        @RegexBuilder _ component: () -> Component
+      ) -> \(regexTypeName)<\(params.matchType)> \(params.whereClause) {
+        assert(count > 0, "Must specify a positive count")
+        // TODO: Emit a warning about `repeatMatch(count: 0)` or `repeatMatch(count: 1)`
+        return Regex(node: .quantification(.exactly(.init(faking: count)), .eager, component().regex.root))
+      }
+      
+      \(params.disfavored)\
+      public func repeating<\(params.genericParams), R: RangeExpression>(
+        _ component: Component,
+        _ expression: R,
+        _ behavior: QuantificationBehavior = .eagerly
+      ) -> \(regexTypeName)<\(params.matchType)> \(params.repeatingWhereClause) {
+        .init(node: .repeating(expression.relative(to: 0..<Int.max), behavior, component.regex.root))
+      }
+
+      \(params.disfavored)\
+      public func repeating<\(params.genericParams), R: RangeExpression>(
+        _ expression: R,
+        _ behavior: QuantificationBehavior = .eagerly,
+        @RegexBuilder _ component: () -> Component
+      ) -> \(regexTypeName)<\(params.matchType)> \(params.repeatingWhereClause) {
+        .init(node: .repeating(expression.relative(to: 0..<Int.max), behavior, component().regex.root))
+      }
+      
+      """)
+  }
+
+  func emitAlternation(leftArity: Int, rightArity: Int) {
+    let leftGenParams: String = {
+      if leftArity == 0 {
+        return "R0"
+      }
+      return "R0, W0, " + (0..<leftArity).map { "C\($0)" }.joined(separator: ", ")
+    }()
+    let rightGenParams: String = {
+      if rightArity == 0 {
+        return "R1"
+      }
+      return "R1, W1, " + (leftArity..<leftArity+rightArity).map { "C\($0)" }.joined(separator: ", ")
+    }()
+    let genericParams = leftGenParams + ", " + rightGenParams
+    let whereClause: String = {
+      var result = "where R0: \(regexProtocolName), R1: \(regexProtocolName)"
+      if leftArity > 0 {
+        result += ", R0.\(matchAssociatedTypeName) == (W0, \((0..<leftArity).map { "C\($0)" }.joined(separator: ", ")))"
+      }
+      if rightArity > 0 {
+        result += ", R1.\(matchAssociatedTypeName) == (W1, \((leftArity..<leftArity+rightArity).map { "C\($0)" }.joined(separator: ", ")))"
+      }
+      return result
+    }()
+    let resultCaptures: String = {
+      var result = (0..<leftArity).map { "C\($0)" }.joined(separator: ", ")
+      if leftArity > 0, rightArity > 0 {
+        result += ", "
+      }
+      result += (leftArity..<leftArity+rightArity).map { "C\($0)?" }.joined(separator: ", ")
+      return result
+    }()
+    let matchType: String = {
+      if leftArity == 0, rightArity == 0 {
+        return baseMatchTypeName
+      }
+      return "(\(baseMatchTypeName), \(resultCaptures))"
+    }()
+    output("""
+      extension AlternationBuilder {
+        public static func buildBlock<\(genericParams)>(
+          combining next: R1, into combined: R0
+        ) -> \(regexTypeName)<\(matchType)> \(whereClause) {
+          .init(node: combined.regex.root.appendingAlternationCase(next.regex.root))
+        }
+      }
+
+      public func | <\(genericParams)>(lhs: R0, rhs: R1) -> \(regexTypeName)<\(matchType)> \(whereClause) {
+        .init(node: lhs.regex.root.appendingAlternationCase(rhs.regex.root))
+      }
+
+      """)
+  }
+
+  func emitUnaryAlternationBuildBlock(arity: Int) {
+    assert(arity > 0)
+    let captures = (0..<arity).map { "C\($0)" }.joined(separator: ", ")
+    let genericParams: String = {
+      if arity == 0 {
+        return "R"
+      }
+      return "R, W, " + captures
+    }()
+    let whereClause: String = """
+      where R: \(regexProtocolName), \
+      R.\(matchAssociatedTypeName) == (W, \(captures))
+      """
+    let resultCaptures = (0..<arity).map { "C\($0)?" }.joined(separator: ", ")
+    output("""
+      extension AlternationBuilder {
+        public static func buildBlock<\(genericParams)>(_ regex: R) -> \(regexTypeName)<(W, \(resultCaptures))> \(whereClause) {
+          .init(node: .alternation([regex.regex.root]))
+        }
+      }
+      
+      """)
+  }
+
+  func emitCapture(arity: Int) {
+    let genericParams = arity == 0
+      ? "R: \(regexProtocolName), W"
+      : "R: \(regexProtocolName), W, " + (0..<arity).map { "C\($0)" }.joined(separator: ", ")
+    let matchType = arity == 0
+      ? "W"
+      : "(W, " + (0..<arity).map { "C\($0)" }.joined(separator: ", ") + ")"
+    func newMatchType(newCaptureType: String) -> String {
+      return arity == 0
+        ? "(\(baseMatchTypeName), \(newCaptureType))"
+        : "(\(baseMatchTypeName), \(newCaptureType), " + (0..<arity).map { "C\($0)" }.joined(separator: ", ") + ")"
+    }
+    let whereClause = "where R.\(matchAssociatedTypeName) == \(matchType)"
+    output("""
+      // MARK: - Non-builder capture arity \(arity)
+
+      public func capture<\(genericParams)>(_ component: R) -> \(regexTypeName)<\(newMatchType(newCaptureType: "W"))> \(whereClause) {
+        .init(node: .group(.capture, component.regex.root))
+      }
+
+      public func capture<\(genericParams), NewCapture>(
+        _ component: R, transform: @escaping (Substring) -> NewCapture
+      ) -> \(regexTypeName)<\(newMatchType(newCaptureType: "NewCapture"))> \(whereClause) {
+        .init(node: .groupTransform(
+          .capture,
+          component.regex.root,
+          CaptureTransform(resultType: NewCapture.self) {
+            transform($0) as Any
+          }))
+      }
+
+      public func tryCapture<\(genericParams), NewCapture>(
+        _ component: R, transform: @escaping (Substring) throws -> NewCapture
+      ) -> \(regexTypeName)<\(newMatchType(newCaptureType: "NewCapture"))> \(whereClause) {
+        .init(node: .groupTransform(
+          .capture,
+          component.regex.root,
+          CaptureTransform(resultType: NewCapture.self) {
+            try transform($0) as Any
+          }))
+      }
+
+      public func tryCapture<\(genericParams), NewCapture>(
+        _ component: R, transform: @escaping (Substring) -> NewCapture?
+      ) -> \(regexTypeName)<\(newMatchType(newCaptureType: "NewCapture"))> \(whereClause) {
+        .init(node: .groupTransform(
+          .capture,
+          component.regex.root,
+          CaptureTransform(resultType: NewCapture.self) {
+            transform($0) as Any?
+          }))
+      }
+
+      // MARK: - Builder capture arity \(arity)
+
+      public func capture<\(genericParams)>(
+        @RegexBuilder _ component: () -> R
+      ) -> \(regexTypeName)<\(newMatchType(newCaptureType: "W"))> \(whereClause) {
+        .init(node: .group(.capture, component().regex.root))
+      }
+
+      public func capture<\(genericParams), NewCapture>(
+        @RegexBuilder _ component: () -> R,
+        transform: @escaping (Substring) -> NewCapture
+      ) -> \(regexTypeName)<\(newMatchType(newCaptureType: "NewCapture"))> \(whereClause) {
+        .init(node: .groupTransform(
+          .capture,
+          component().regex.root,
+          CaptureTransform(resultType: NewCapture.self) {
+            transform($0) as Any
+          }))
+      }
+
+      public func tryCapture<\(genericParams), NewCapture>(
+        @RegexBuilder _ component: () -> R,
+        transform: @escaping (Substring) throws -> NewCapture
+      ) -> \(regexTypeName)<\(newMatchType(newCaptureType: "NewCapture"))> \(whereClause) {
+        .init(node: .groupTransform(
+          .capture,
+          component().regex.root,
+          CaptureTransform(resultType: NewCapture.self) {
+            try transform($0) as Any
+          }))
+      }
+
+      public func tryCapture<\(genericParams), NewCapture>(
+        @RegexBuilder _ component: () -> R,
+        transform: @escaping (Substring) -> NewCapture?
+      ) -> \(regexTypeName)<\(newMatchType(newCaptureType: "NewCapture"))> \(whereClause) {
+        .init(node: .groupTransform(
+          .capture,
+          component().regex.root,
+          CaptureTransform(resultType: NewCapture.self) {
+            transform($0) as Any?
+          }))
+      }
+
+      """)
   }
 }

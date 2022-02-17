@@ -11,58 +11,6 @@
 
 import _MatchingEngine
 
-struct Unsupported: Error, CustomStringConvertible {
-  var message: String
-  var file: String
-  var line: Int
-
-  var description: String { """
-    Unsupported: '\(message)'
-      \(file):\(line)
-    """
-  }
-
-  init(
-    _ s: String,
-    file: StaticString = #file,
-    line: UInt = #line
-  ) {
-    self.message = s
-    self.file = file.description
-    self.line = Int(asserting: line)
-  }
-}
-
-// TODO: Remove
-func unsupported(
-  _ s: String,
-  file: StaticString = #file,
-  line: UInt = #line
-) -> Unsupported {
-  return Unsupported(s, file: file, line: line)
-}
-
-struct Unreachable: Error, CustomStringConvertible {
-  var message: String
-  var file: String
-  var line: Int
-
-  var description: String { """
-    Unreachable: '\(message)'
-      \(file):\(line)
-    """
-  }
-}
-
-func unreachable(
-  _ s: String,
-  file: StaticString = #file,
-  line: Int = #line
-) -> Unreachable {
-  return Unreachable(
-    message: s, file: String(describing: file), line: line)
-}
-
 extension DSLTree.Node {
   /// Attempt to generate a consumer from this AST node
   ///
@@ -70,7 +18,7 @@ extension DSLTree.Node {
   /// the front of an input range
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction? {
+  ) throws -> MEProgram<String>.ConsumeFunction? {
     switch self {
     case .atom(let a):
       return try a.generateConsumer(opts)
@@ -107,7 +55,7 @@ extension DSLTree.Atom {
   // unnecessary...
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction? {
+  ) throws -> MEProgram<String>.ConsumeFunction? {
     switch self {
 
     case let .char(c):
@@ -164,7 +112,7 @@ extension AST.Atom {
 
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction? {
+  ) throws -> MEProgram<String>.ConsumeFunction? {
     // TODO: Wean ourselves off of this type...
     if let cc = self.characterClass?.withMatchLevel(
       opts.matchLevel
@@ -223,7 +171,7 @@ extension AST.Atom {
 extension DSLTree.CustomCharacterClass.Member {
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction {
+  ) throws -> MEProgram<String>.ConsumeFunction {
     switch self {
     case let .atom(a):
       guard let c = try a.generateConsumer(opts) else {
@@ -233,10 +181,10 @@ extension DSLTree.CustomCharacterClass.Member {
     case let .range(low, high):
       // TODO:
       guard let lhs = low.literalCharacterValue else {
-        throw unsupported("\(low) in range")
+        throw Unsupported("\(low) in range")
       }
       guard let rhs = high.literalCharacterValue else {
-        throw unsupported("\(high) in range")
+        throw Unsupported("\(high) in range")
       }
 
       return { input, bounds in
@@ -308,17 +256,17 @@ extension DSLTree.CustomCharacterClass.Member {
 extension AST.CustomCharacterClass.Member {
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction {
+  ) throws -> MEProgram<String>.ConsumeFunction {
     switch self {
     case .custom(let ccc):
       return try ccc.generateConsumer(opts)
 
     case .range(let r):
       guard let lhs = r.lhs.literalCharacterValue else {
-        throw unsupported("\(r.lhs) in range")
+        throw Unsupported("\(r.lhs) in range")
       }
       guard let rhs = r.rhs.literalCharacterValue else {
-        throw unsupported("\(r.rhs) in range")
+        throw Unsupported("\(r.rhs) in range")
       }
 
       return { input, bounds in
@@ -333,7 +281,7 @@ extension AST.CustomCharacterClass.Member {
 
     case .atom(let atom):
       guard let gen = try atom.generateConsumer(opts) else {
-        throw unsupported("TODO")
+        throw Unsupported("TODO")
       }
       return gen
 
@@ -352,7 +300,8 @@ extension AST.CustomCharacterClass.Member {
       }
 
     case .trivia:
-      throw unreachable("Should have been stripped by caller")
+      throw Unreachable(
+        "Should have been stripped by caller")
 
     case .setOperation(let lhs, let op, let rhs):
       // TODO: We should probably have a component type
@@ -402,7 +351,7 @@ extension AST.CustomCharacterClass.Member {
 extension DSLTree.CustomCharacterClass {
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction {
+  ) throws -> MEProgram<String>.ConsumeFunction {
     // NOTE: Easy way to implement, obviously not performant
     let consumers = try members.map {
       try $0.generateConsumer(opts)
@@ -425,7 +374,7 @@ extension DSLTree.CustomCharacterClass {
 extension AST.CustomCharacterClass {
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction {
+  ) throws -> MEProgram<String>.ConsumeFunction {
     // NOTE: Easy way to implement, obviously not performant
     let consumers = try strippingTriviaShallow.members.map {
       try $0.generateConsumer(opts)
@@ -448,22 +397,22 @@ extension AST.CustomCharacterClass {
 // NOTE: Conveniences, though not most performant
 private func consumeScalarGC(
   _ gc: Unicode.GeneralCategory
-) -> Program<String>.ConsumeFunction {
+) -> MEProgram<String>.ConsumeFunction {
   consumeScalar { gc == $0.properties.generalCategory }
 }
 private func consumeScalarGCs(
   _ gcs: [Unicode.GeneralCategory]
-) -> Program<String>.ConsumeFunction {
+) -> MEProgram<String>.ConsumeFunction {
   consumeScalar { gcs.contains($0.properties.generalCategory) }
 }
 private func consumeScalarProp(
   _ p: @escaping (Unicode.Scalar.Properties) -> Bool
-) -> Program<String>.ConsumeFunction {
+) -> MEProgram<String>.ConsumeFunction {
   consumeScalar { p($0.properties) }
 }
 func consumeScalar(
   _ p: @escaping (Unicode.Scalar) -> Bool
-) -> Program<String>.ConsumeFunction {
+) -> MEProgram<String>.ConsumeFunction {
   { input, bounds in
     // TODO: bounds check?
     let curIdx = bounds.lowerBound
@@ -478,11 +427,11 @@ func consumeScalar(
 extension AST.Atom.CharacterProperty {
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction {
+  ) throws -> MEProgram<String>.ConsumeFunction {
     // Handle inversion for us, albeit not efficiently
     func invert(
-      _ p: @escaping Program<String>.ConsumeFunction
-    ) -> Program<String>.ConsumeFunction {
+      _ p: @escaping MEProgram<String>.ConsumeFunction
+    ) -> MEProgram<String>.ConsumeFunction {
       return { input, bounds in
         if p(input, bounds) != nil { return nil }
         // TODO: semantic level
@@ -495,7 +444,7 @@ extension AST.Atom.CharacterProperty {
     // FIXME: Below is largely scalar based, for convenience,
     // but we want a comprehensive treatment to semantic mode
     // switching.
-    let preInversion: Program<String>.ConsumeFunction =
+    let preInversion: MEProgram<String>.ConsumeFunction =
     try {
       switch kind {
         // TODO: is this modeled differently?
@@ -520,22 +469,23 @@ extension AST.Atom.CharacterProperty {
         return value ? cons : invert(cons)
 
       case .script(let s):
-        throw unsupported("TODO: Map script: \(s)")
+        throw Unsupported("TODO: Map script: \(s)")
 
       case .scriptExtension(let s):
-        throw unsupported("TODO: Map script: \(s)")
+        throw Unsupported("TODO: Map script: \(s)")
 
       case .posix(let p):
         return p.generateConsumer(opts)
 
       case .pcreSpecial(let s):
-        throw unsupported("TODO: map PCRE special: \(s)")
+        throw Unsupported("TODO: map PCRE special: \(s)")
 
       case .onigurumaSpecial(let s):
-        throw unsupported("TODO: map Oniguruma special: \(s)")
+        throw Unsupported("TODO: map Oniguruma special: \(s)")
 
       case let .other(key, value):
-        throw unsupported("TODO: map other \(key ?? "")=\(value)")
+        throw Unsupported(
+          "TODO: map other \(key ?? "")=\(value)")
       }
     }()
 
@@ -548,7 +498,7 @@ extension Unicode.BinaryProperty {
   // FIXME: Semantic level, vet for precise defs
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction {
+  ) throws -> MEProgram<String>.ConsumeFunction {
     switch self {
 
     case .asciiHexDigit:
@@ -593,7 +543,8 @@ extension Unicode.BinaryProperty {
       if #available(macOS 10.12.2, iOS 10.2, tvOS 10.1, watchOS 3.1.1, *) {
         return consumeScalarProp(\.isEmojiModifierBase)
       } else {
-        throw unsupported("isEmojiModifierBase on old OSes")
+        throw Unsupported(
+          "isEmojiModifierBase on old OSes")
       }
     case .emojiComponent:
       break
@@ -601,19 +552,20 @@ extension Unicode.BinaryProperty {
       if #available(macOS 10.12.2, iOS 10.2, tvOS 10.1, watchOS 3.1.1, *) {
         return consumeScalarProp(\.isEmojiModifier)
       } else {
-        throw unsupported("isEmojiModifier on old OSes")
+        throw Unsupported("isEmojiModifier on old OSes")
       }
     case .emoji:
       if #available(macOS 10.12.2, iOS 10.2, tvOS 10.1, watchOS 3.1.1, *) {
         return consumeScalarProp(\.isEmoji)
       } else {
-        throw unsupported("isEmoji on old OSes")
+        throw Unsupported("isEmoji on old OSes")
       }
     case .emojiPresentation:
       if #available(macOS 10.12.2, iOS 10.2, tvOS 10.1, watchOS 3.1.1, *) {
         return consumeScalarProp(\.isEmojiPresentation)
       } else {
-        throw unsupported("isEmojiPresentation on old OSes")
+        throw Unsupported(
+          "isEmojiPresentation on old OSes")
       }
     case .extender:
       return consumeScalarProp(\.isExtender)
@@ -701,10 +653,10 @@ extension Unicode.BinaryProperty {
       return consumeScalarProp(\.isXIDStart)
     case .expandsOnNFC, .expandsOnNFD, .expandsOnNFKD,
         .expandsOnNFKC:
-      throw unsupported("Unicode-deprecated: \(self)")
+      throw Unsupported("Unicode-deprecated: \(self)")
     }
 
-    throw unsupported("TODO: map prop \(self)")
+    throw Unsupported("TODO: map prop \(self)")
   }
 }
 
@@ -712,7 +664,7 @@ extension Unicode.POSIXProperty {
   // FIXME: Semantic level, vet for precise defs
   func generateConsumer(
     _ opts: MatchingOptions
-  ) -> Program<String>.ConsumeFunction {
+  ) -> MEProgram<String>.ConsumeFunction {
     // FIXME: semantic levels, modes, etc
     switch self {
     case .alnum:
@@ -758,7 +710,7 @@ extension Unicode.ExtendedGeneralCategory {
   // FIXME: Semantic level
   func generateConsumer(
     _ opts: MatchingOptions
-  ) throws -> Program<String>.ConsumeFunction {
+  ) throws -> MEProgram<String>.ConsumeFunction {
     switch self {
     case .letter:
       return consumeScalarGCs([
@@ -802,7 +754,8 @@ extension Unicode.ExtendedGeneralCategory {
       ])
 
     case .casedLetter:
-      throw unsupported("TODO: cased letter? not the property?")
+      throw Unsupported(
+        "TODO: cased letter? not the property?")
 
     case .control:
       return consumeScalarGC(.control)

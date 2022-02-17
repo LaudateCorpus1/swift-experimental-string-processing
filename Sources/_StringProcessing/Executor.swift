@@ -15,8 +15,8 @@ public struct Executor {
   // TODO: consider let, for now lets us toggle tracing
   var engine: Engine<String>
 
-  init(program: RegexProgram, enablesTracing: Bool = false) {
-    self.engine = Engine(program.program, enableTracing: enablesTracing)
+  init(program: Program, enablesTracing: Bool = false) {
+    self.engine = Engine(program, enableTracing: enablesTracing)
   }
 
   public func execute(
@@ -24,12 +24,14 @@ public struct Executor {
     in range: Range<String.Index>,
     mode: MatchMode = .wholeString
   ) -> MatchResult? {
-    engine.consume(
-      input, in: range, matchMode: mode.loweredMatchMode
-    ).map { endIndex, capture in
-      _ = capture // TODO: construct structure
-      return MatchResult(range.lowerBound..<endIndex, .void)
+    guard let (endIdx, capList) = engine.consume(
+      input, in: range, matchMode: mode
+    ) else {
+      return nil
     }
+    let capStruct = engine.program.captureStructure
+    let caps = try! capStruct.structuralize(capList, input)
+    return MatchResult(range.lowerBound..<endIdx, caps)
   }
   public func execute(
     input: Substring,
@@ -47,7 +49,7 @@ public struct Executor {
     mode: MatchMode = .wholeString
   ) -> (Range<String.Index>, CaptureList)? {
     engine.consume(
-      input, in: range, matchMode: mode.loweredMatchMode
+      input, in: range, matchMode: mode
     ).map { endIndex, capture in
       (range.lowerBound..<endIndex, capture)
     }
@@ -59,18 +61,7 @@ public struct Executor {
 extension Executor: VirtualMachine {
   static let motto = "Executor"
 
-  init(program: RegexProgram) {
+  init(program: Program) {
     self.init(program: program, enablesTracing: false)
-  }
-}
-
-extension _StringProcessing.MatchMode {
-  var loweredMatchMode: _MatchingEngine.MatchMode {
-    switch self {
-    case .wholeString:
-      return .full
-    case .partialFromFront:
-      return .prefix
-    }
   }
 }

@@ -11,11 +11,6 @@
 
 import _MatchingEngine
 
-struct RegexProgram {
-  typealias Program = _MatchingEngine.Program<String>
-  var program: Program
-}
-
 class Compiler {
   let tree: DSLTree
 
@@ -30,12 +25,13 @@ class Compiler {
     self.tree = tree
   }
 
-  __consuming func emit() throws -> RegexProgram {
+  __consuming func emit() throws -> Program {
     // TODO: Handle global options
     var codegen = ByteCodeGen(options: options)
+    codegen.builder.captureStructure = tree.captureStructure
     try codegen.emitNode(tree.root)
-    let program = codegen.finish()
-    return RegexProgram(program: program)
+    let program = try codegen.finish()
+    return program
   }
 }
 
