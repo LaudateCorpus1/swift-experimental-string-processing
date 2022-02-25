@@ -25,7 +25,7 @@ struct MatchingOptions {
   }
 }
 
-// Compiler API
+// MARK: Compilation API
 extension MatchingOptions {
   /// Creates an instance with the default options.
   init() {
@@ -51,7 +51,14 @@ extension MatchingOptions {
     stack[stack.count - 1].apply(sequence)
     _invariantCheck()
   }
+}
 
+// MARK: Matching behavior API
+extension MatchingOptions {
+  var isCaseInsensitive: Bool {
+    stack.last!.contains(.caseInsensitive)
+  }
+  
   var isReluctantByDefault: Bool {
     stack.last!.contains(.reluctantByDefault)
   }
@@ -182,6 +189,19 @@ extension MatchingOptions {
       contains(.init(kind))
     }
     
+    mutating func add(_ opt: Option) {
+      // If opt is in one of the mutually exclusive groups, clear out the
+      // group before inserting.
+      if Self.semanticMatchingLevels.contains(opt.representation) {
+        remove(.semanticMatchingLevels)
+      }
+      if Self.textSegmentOptions.contains(opt.representation) {
+        remove(.textSegmentOptions)
+      }
+
+      insert(opt.representation)
+    }
+    
     /// Applies the changes described by `sequence` to this set of options.
     mutating func apply(_ sequence: AST.MatchingOptionSequence) {
       // Replace entirely if the sequence includes a caret, e.g. `(?^is)`.
@@ -190,28 +210,17 @@ extension MatchingOptions {
       }
       
       for opt in sequence.adding {
-        guard let opt = Option(opt.kind)?.representation else {
+        guard let opt = Option(opt.kind) else {
           continue
         }
-        
-        // If opt is in one of the mutually exclusive groups, clear out the
-        // group before inserting.
-        if Self.semanticMatchingLevels.contains(opt) {
-          remove(.semanticMatchingLevels)
-        }
-        if Self.textSegmentOptions.contains(opt) {
-          remove(.textSegmentOptions)
-        }
-
-        insert(opt)
+        add(opt)
       }
       
       for opt in sequence.removing {
-        guard let opt = Option(opt.kind)?.representation else {
+        guard let opt = Option(opt.kind) else {
           continue
         }
-
-        remove(opt)
+        remove(opt.representation)
       }
     }
   }
@@ -221,6 +230,9 @@ extension MatchingOptions.Representation {
   fileprivate init(_ kind: MatchingOptions.Option) {
     self.rawValue = 1 << kind.rawValue
   }
+  
+  // Case insensitivity
+  static var caseInsensitive: Self { .init(.caseInsensitive) }
   
   // Text segmentation options
   static var textSegmentGraphemeMode: Self { .init(.textSegmentGraphemeMode) }

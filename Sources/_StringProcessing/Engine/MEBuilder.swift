@@ -22,6 +22,7 @@ extension MEProgram where Input.Element: Hashable {
     var consumeFunctions: [ConsumeFunction] = []
     var assertionFunctions: [AssertionFunction] = []
     var transformFunctions: [TransformFunction] = []
+    var matcherFunctions: [MatcherFunction] = []
 
     // Map tokens to actual addresses
     var addressTokens: [InstructionAddress?] = []
@@ -32,6 +33,7 @@ extension MEProgram where Input.Element: Hashable {
     var nextIntRegister = IntRegister(0)
     var nextPositionRegister = PositionRegister(0)
     var nextCaptureRegister = CaptureRegister(0)
+    var nextValueRegister = ValueRegister(0)
 
     // Special addresses or instructions
     var failAddressToken: AddressToken? = nil
@@ -39,6 +41,14 @@ extension MEProgram where Input.Element: Hashable {
     // TODO: Should we have better API for building this up
     // as we compile?
     var captureStructure: CaptureStructure = .empty
+
+    // Symbolic reference resolution
+    var unresolvedReferences: [ReferenceID: [InstructionAddress]] = [:]
+    var referencedCaptureOffsets: [ReferenceID: Int] = [:]
+    var captureCount: Int {
+      // We currently deduce the capture count from the capture register number.
+      nextCaptureRegister.rawValue
+    }
 
     public init() {}
   }
@@ -59,10 +69,14 @@ extension MEProgram.Builder {
 
 extension MEProgram.Builder {
   // TODO: We want a better strategy for fixups, leaving
-  // the operand in a differenet form isn't great...
+  // the operand in a different form isn't great...
 
   public init<S: Sequence>(staticElements: S) where S.Element == Input.Element {
     staticElements.forEach { elements.store($0) }
+  }
+
+  var lastInstructionAddress: InstructionAddress {
+    .init(instructions.endIndex - 1)
   }
 
   public mutating func buildNop(_ r: StringRegister? = nil) {
@@ -237,6 +251,22 @@ extension MEProgram.Builder {
       .init(capture: cap, transform: trans)))
   }
 
+  public mutating func buildMatcher(
+    _ fun: MatcherRegister, into reg: ValueRegister
+  ) {
+    instructions.append(.init(
+      .matchBy,
+      .init(matcher: fun, value: reg)))
+  }
+
+  public mutating func buildMove(
+    _ value: ValueRegister, into capture: CaptureRegister
+  ) {
+    instructions.append(.init(
+      .captureValue,
+      .init(value: value, capture: capture)))
+  }
+
   public mutating func buildBackreference(
     _ cap: CaptureRegister
   ) {
@@ -244,9 +274,16 @@ extension MEProgram.Builder {
       .init(.backreference, .init(capture: cap)))
   }
 
+  public mutating func buildUnresolvedReference(id: ReferenceID) {
+    buildBackreference(.init(0))
+    unresolvedReferences[id, default: []].append(lastInstructionAddress)
+  }
+
   // TODO: Mutating because of fail address fixup, drop when
   // that's removed
   public mutating func assemble() throws -> MEProgram {
+    try resolveReferences()
+
     // TODO: This will add a fail instruction at the end every
     // time it's assembled. Better to do to the local instruction
     // list copy, but that complicates logic. It's possible we
@@ -298,9 +335,11 @@ extension MEProgram.Builder {
     regInfo.bools = nextBoolRegister.rawValue
     regInfo.ints = nextIntRegister.rawValue
     regInfo.positions = nextPositionRegister.rawValue
+    regInfo.values = nextValueRegister.rawValue
     regInfo.consumeFunctions = consumeFunctions.count
     regInfo.assertionFunctions = assertionFunctions.count
     regInfo.transformFunctions = transformFunctions.count
+    regInfo.matcherFunctions = matcherFunctions.count
     regInfo.captures = nextCaptureRegister.rawValue
 
     return MEProgram(
@@ -311,8 +350,10 @@ extension MEProgram.Builder {
       staticConsumeFunctions: consumeFunctions,
       staticAssertionFunctions: assertionFunctions,
       staticTransformFunctions: transformFunctions,
+      staticMatcherFunctions: matcherFunctions,
       registerInfo: regInfo,
-      captureStructure: captureStructure)
+      captureStructure: captureStructure,
+      referencedCaptureOffsets: referencedCaptureOffsets)
   }
 
   public mutating func reset() { self = Self() }
@@ -380,10 +421,31 @@ extension MEProgram.Builder {
 
 }
 
+// Symbolic reference helpers
+fileprivate extension MEProgram.Builder {
+  mutating func resolveReferences() throws {
+    for (id, uses) in unresolvedReferences {
+      guard let offset = referencedCaptureOffsets[id] else {
+        throw RegexCompilationError.uncapturedReference
+      }
+      for use in uses {
+        instructions[use.rawValue] =
+          Instruction(.backreference, .init(capture: .init(offset)))
+      }
+    }
+  }
+}
+
 // Register helpers
 extension MEProgram.Builder {
-  public mutating func makeCapture() -> CaptureRegister {
+  public mutating func makeCapture(id: ReferenceID?) -> CaptureRegister {
     defer { nextCaptureRegister.rawValue += 1 }
+    // Register the capture for later lookup via symbolic references.
+    if let id = id {
+      let preexistingValue = referencedCaptureOffsets.updateValue(
+        captureCount, forKey: id)
+      assert(preexistingValue == nil)
+    }
     return nextCaptureRegister
   }
 
@@ -398,6 +460,10 @@ extension MEProgram.Builder {
   public mutating func makePositionRegister() -> PositionRegister {
     defer { nextPositionRegister.rawValue += 1 }
     return nextPositionRegister
+  }
+  public mutating func makeValueRegister() -> ValueRegister {
+    defer { nextValueRegister.rawValue += 1 }
+    return nextValueRegister
   }
 
   // Allocate and initialize a register
@@ -455,6 +521,12 @@ extension MEProgram.Builder {
   ) -> TransformRegister {
     defer { transformFunctions.append(f) }
     return TransformRegister(transformFunctions.count)
+  }
+  public mutating func makeMatcherFunction(
+    _ f: @escaping MEProgram.MatcherFunction
+  ) -> MatcherRegister {
+    defer { matcherFunctions.append(f) }
+    return MatcherRegister(matcherFunctions.count)
   }
 }
 

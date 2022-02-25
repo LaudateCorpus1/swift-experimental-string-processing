@@ -87,9 +87,10 @@ extension PrettyPrinter {
         }
       }
 
-    case let .group(kind, child):
+    case let .group(kind, child, referenceID):
       let kind = kind._patternBase
-      printBlock("Group(\(kind))") { printer in
+      let refIDString = referenceID.map { ", referenceID: \($0)" } ?? ""
+      printBlock("Group(\(kind)\(refIDString)") { printer in
         printer.printAsPattern(convertedFromAST: child)
       }
 
@@ -121,9 +122,11 @@ extension PrettyPrinter {
         print(a._patternBase)
 
       case .assertion:
-        print("/* TOOD: assertions */")
+        print("/* TODO: assertions */")
       case .backreference:
         print("/* TOOD: backreferences */")
+      case .symbolicReference:
+        print("/* TOOD: symbolic references */")
       }
 
     case .trivia:
@@ -141,7 +144,7 @@ extension PrettyPrinter {
 
     case let .convertedRegexLiteral(n, _):
       // FIXME: This recursion coordinates with back-off
-      // check above, so it shoud work out. Need a
+      // check above, so it should work out. Need a
       // cleaner way to do this. This means the argument
       // label is a lie.
       printAsPattern(convertedFromAST: n)
@@ -153,7 +156,7 @@ extension PrettyPrinter {
       print("/* TODO: group transforms */")
     case .consumer:
       print("/* TODO: consumers */")
-    case .consumerValidator:
+    case .matcher:
       print("/* TODO: consumer validators */")
     case .characterPredicate:
       print("/* TODO: character predicates */")
@@ -315,7 +318,7 @@ extension AST.Group.Kind {
   var _patternBase: String {
     switch self {
     case .capture:
-      // TODO: We probably want this to be a prperty after group
+      // TODO: We probably want this to be a property after group
       return ".capture"
 
     case .namedCapture(let n):

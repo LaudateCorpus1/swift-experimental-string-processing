@@ -9,23 +9,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-import _MatchingEngine
-typealias Program = MEProgram<String>
+public protocol CustomRegexComponent: RegexProtocol {
+  func match(
+    _ input: String,
+    startingAt index: String.Index,
+    in bounds: Range<String.Index>
+  ) -> (upperBound: String.Index, match: Match)?
+}
 
-public struct MatchResult {
-  public var range: Range<String.Index>
-  var captures: Capture
-
-  var destructure: (
-    matched: Range<String.Index>, captures: Capture
-  ) {
-    (range, captures)
-  }
-
-  init(
-    _ matched: Range<String.Index>, _ captures: Capture
-  ) {
-    self.range = matched
-    self.captures = captures
+extension CustomRegexComponent {
+  public var regex: Regex<Match> {
+    Regex(node: .matcher(.init(Match.self), { input, index, bounds in
+      match(input, startingAt: index, in: bounds)
+    }))
   }
 }

@@ -30,7 +30,7 @@ extension DSLTree {
     case concatenation([Node])
 
     /// (...)
-    case group(AST.Group.Kind, Node)
+    case group(AST.Group.Kind, Node, ReferenceID? = nil)
 
     /// (?(cond) true-branch | false-branch)
     ///
@@ -69,20 +69,24 @@ extension DSLTree {
 
     /// The target of AST conversion.
     ///
-    /// Keeps original AST around for rich syntatic and source information
+    /// Keeps original AST around for rich syntactic and source information
     case convertedRegexLiteral(Node, AST.Node)
 
     // MARK: - Extensibility points
 
     /// A capturing group (TODO: is it?) with a transformation function
+    ///
+    /// TODO: Consider as a validator or constructor nested in a
+    /// group, or split capturing off of group.
     case groupTransform(
       AST.Group.Kind,
       Node,
-      CaptureTransform)
+      CaptureTransform,
+      ReferenceID? = nil)
 
     case consumer(_ConsumerInterface)
 
-    case consumerValidator(_ConsumerValidatorInterface)
+    case matcher(AnyType, _MatcherInterface)
 
     // TODO: Would this just boil down to a consumer?
     case characterPredicate(_CharacterPredicateInterface)
@@ -116,6 +120,7 @@ extension DSLTree {
 
     case assertion(AST.Atom.AssertionKind)
     case backreference(AST.Reference)
+    case symbolicReference(ReferenceID)
 
     case unconverted(AST.Atom)
   }
@@ -127,9 +132,10 @@ typealias _ConsumerInterface = (
 ) -> String.Index?
 
 // Type producing consume
-typealias _ConsumerValidatorInterface = (
-  String, Range<String.Index>
-) -> (Any, Any.Type, String.Index)?
+// TODO: better name
+typealias _MatcherInterface = (
+  String, String.Index, Range<String.Index>
+) -> (String.Index, Any)?
 
 // Character-set (post grapheme segmentation)
 typealias _CharacterPredicateInterface = (
@@ -158,14 +164,14 @@ extension DSLTree.Node {
       // Treat this transparently
       return n.children
 
-    case let .group(_, n):             return [n]
-    case let .groupTransform(_, n, _): return [n]
+    case let .group(_, n, _):             return [n]
+    case let .groupTransform(_, n, _, _): return [n]
     case let .quantification(_, _, n): return [n]
 
     case let .conditional(_, t, f): return [t,f]
 
     case .trivia, .empty, .quotedLiteral, .regexLiteral,
-        .consumer, .consumerValidator, .characterPredicate,
+        .consumer, .matcher, .characterPredicate,
         .customCharacterClass, .atom:
       return []
 
@@ -220,8 +226,8 @@ extension DSLTree {
 extension DSLTree.Node {
   var hasCapture: Bool {
     switch self {
-    case let .group(k, _) where k.isCapturing,
-         let .groupTransform(k, _, _) where k.isCapturing:
+    case let .group(k, _, _) where k.isCapturing,
+         let .groupTransform(k, _, _, _) where k.isCapturing:
       return true
     case let .convertedRegexLiteral(n, re):
       assert(n.hasCapture == re.hasCapture)
@@ -253,10 +259,14 @@ extension DSLTree.Node {
     case let .concatenation(children):
       return constructor.concatenating(children)
 
-    case let .group(kind, child):
+    case let .group(kind, child, _):
+      if let type = child.matcherCaptureType {
+        return constructor.grouping(
+          child, as: kind, withType: type)
+      }
       return constructor.grouping(child, as: kind)
 
-    case let .groupTransform(kind, child, transform):
+    case let .groupTransform(kind, child, transform, _):
       return constructor.grouping(
         child, as: kind, withTransform: transform)
 
@@ -281,13 +291,21 @@ extension DSLTree.Node {
       // TODO: Switch nesting strategy?
       return n._captureStructure(&constructor)
 
-    case .consumerValidator:
-      // FIXME: This is where we make a capture!
+    case .matcher:
       return .empty
 
     case .customCharacterClass, .atom, .trivia, .empty,
         .quotedLiteral, .consumer, .characterPredicate:
       return .empty
+    }
+  }
+
+  // TODO: Unify with group transform
+  var matcherCaptureType: AnyType? {
+    switch self {
+    case let .matcher(t, _):
+      return t
+    default: return nil
     }
   }
 }

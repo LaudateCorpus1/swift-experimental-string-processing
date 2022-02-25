@@ -20,20 +20,19 @@ extension Compiler.ByteCodeGen {
       emitAny()
 
     case let .char(c):
-      // FIXME: Does semantic level matter?
-      builder.buildMatch(c)
-
+      try emitCharacter(c)
+      
     case let .scalar(s):
-      // TODO: Native instruction
-      builder.buildConsume(by: consumeScalar {
-        $0 == s
-      })
-
+      try emitScalar(s)
+      
     case let .assertion(kind):
       try emitAssertion(kind)
 
     case let .backreference(ref):
       try emitBackreference(ref)
+
+    case let .symbolicReference(id):
+      builder.buildUnresolvedReference(id: id)
 
     case let .unconverted(astAtom):
       if let consumer = try astAtom.generateConsumer(options) {
@@ -133,6 +132,36 @@ extension Compiler.ByteCodeGen {
         !CharacterClass.word.isBoundary(
           input, at: pos, bounds: bounds)
       }
+    }
+  }
+  
+  mutating func emitScalar(_ s: UnicodeScalar) throws {
+    // TODO: Native instruction buildMatchScalar(s)
+    if options.isCaseInsensitive {
+      // TODO: e.g. buildCaseInsensitiveMatchScalar(s)
+      builder.buildConsume(by: consumeScalar {
+        $0.properties.lowercaseMapping == s.properties.lowercaseMapping
+      })
+    } else {
+      builder.buildConsume(by: consumeScalar {
+        $0 == s
+      })
+    }
+  }
+  
+  mutating func emitCharacter(_ c: Character) throws {
+    // FIXME: Does semantic level matter?
+    if options.isCaseInsensitive && c.isCased {
+      // TODO: buildCaseInsensitiveMatch(c) or buildMatch(c, caseInsensitive: true)
+      builder.buildConsume { input, bounds in
+        let inputChar = input[bounds.lowerBound].lowercased()
+        let matchChar = c.lowercased()
+        return inputChar == matchChar
+          ? input.index(after: bounds.lowerBound)
+          : nil
+      }
+    } else {
+      builder.buildMatch(c)
     }
   }
 
@@ -246,11 +275,47 @@ extension Compiler.ByteCodeGen {
     builder.label(success)
   }
 
+  mutating func emitMatcher(
+    _ matcher: @escaping _MatcherInterface,
+    into capture: CaptureRegister? = nil
+  ) {
+
+    // TODO: Consider emitting consumer interface if
+    // not captured. This may mean we should store
+    // an existential instead of a closure...
+
+    let matcher = builder.makeMatcherFunction(matcher)
+
+    let valReg = builder.makeValueRegister()
+    builder.buildMatcher(matcher, into: valReg)
+
+    // TODO: Instruction to store directly
+    if let cap = capture {
+      builder.buildMove(valReg, into: cap)
+    }
+  }
+
   mutating func emitGroup(
-    _ kind: AST.Group.Kind, _ child: DSLTree.Node
+    _ kind: AST.Group.Kind,
+    _ child: DSLTree.Node,
+    _ referenceID: ReferenceID?
   ) throws -> CaptureRegister? {
+    guard kind.isCapturing || referenceID == nil else {
+      throw Unreachable("Reference ID shouldn't exist for non-capturing groups")
+    }
+
     options.beginScope()
     defer { options.endScope() }
+
+    // If we have a strong type, write result directly into
+    // the capture register.
+    //
+    // FIXME: Unify with .groupTransform
+    if kind.isCapturing, case let .matcher(_, m) = child {
+      let cap = builder.makeCapture(id: referenceID)
+      emitMatcher(m, into: cap)
+      return cap
+    }
 
     if let lookaround = kind.lookaroundKind {
       try emitLookaround(lookaround, child)
@@ -263,7 +328,7 @@ extension Compiler.ByteCodeGen {
       throw Unreachable("TODO: reason")
 
     case .capture, .namedCapture:
-      let cap = builder.makeCapture()
+      let cap = builder.makeCapture(id: referenceID)
       builder.buildBeginCapture(cap)
       try emitNode(child)
       builder.buildEndCapture(cap)
@@ -496,8 +561,8 @@ extension Compiler.ByteCodeGen {
         try emitConcatenationComponent(child)
       }
 
-    case let .group(kind, child):
-      _ = try emitGroup(kind, child)
+    case let .group(kind, child, referenceID):
+      _ = try emitGroup(kind, child, referenceID)
 
     case .conditional:
       throw Unsupported("Conditionals")
@@ -513,7 +578,22 @@ extension Compiler.ByteCodeGen {
 
     case let .quotedLiteral(s):
       // TODO: Should this incorporate options?
-      builder.buildMatchSequence(s)
+      if options.isCaseInsensitive {
+        // TODO: buildCaseInsensitiveMatchSequence(c) or alternative
+        builder.buildConsume { input, bounds in
+          var iterator = s.makeIterator()
+          var currentIndex = bounds.lowerBound
+          while let ch = iterator.next() {
+            guard currentIndex < bounds.upperBound,
+                  ch.lowercased() == input[currentIndex].lowercased()
+            else { return nil }
+            input.formIndex(after: &currentIndex)
+          }
+          return currentIndex
+        }
+      } else {
+        builder.buildMatchSequence(s)
+      }
 
     case let .regexLiteral(l):
       try emitNode(l.dslTreeNode)
@@ -521,8 +601,8 @@ extension Compiler.ByteCodeGen {
     case let .convertedRegexLiteral(n, _):
       try emitNode(n)
 
-    case let .groupTransform(kind, child, t):
-      guard let cap = try emitGroup(kind, child) else {
+    case let .groupTransform(kind, child, t, referenceID):
+      guard let cap = try emitGroup(kind, child, referenceID) else {
         assertionFailure("""
           What does it mean to not have a capture to transform?
           """)
@@ -541,8 +621,10 @@ extension Compiler.ByteCodeGen {
       throw Unsupported("absent function")
     case .consumer:
       throw Unsupported("consumer")
-    case .consumerValidator:
-      throw Unsupported("consumer validator")
+
+    case let .matcher(_, f):
+      emitMatcher(f)
+
     case .characterPredicate:
       throw Unsupported("character predicates")
 

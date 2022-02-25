@@ -113,7 +113,7 @@ extension AST.Atom {
   // an escape sequence.
   @frozen
   public enum EscapedBuiltin: Hashable {
-    // TOOD: better doc comments
+    // TODO: better doc comments
 
     // Literal single characters
 
@@ -697,7 +697,7 @@ extension AST.Node {
     case .alternation, .concatenation, .group,
         .conditional, .quantification, .quote,
         .trivia, .customCharacterClass, .empty,
-        .groupTransform, .absentFunction:
+        .absentFunction:
       return nil
     }
   }

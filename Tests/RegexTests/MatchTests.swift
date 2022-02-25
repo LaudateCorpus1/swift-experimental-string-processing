@@ -61,7 +61,9 @@ func flatCaptureTest(
   syntax: SyntaxOptions = .traditional,
   enableTracing: Bool = false,
   dumpAST: Bool = false,
-  xfail: Bool = false
+  xfail: Bool = false,
+  file: StaticString = #file,
+  line: UInt = #line
 ) {
   for (test, expect) in tests {
     do {
@@ -78,7 +80,7 @@ func flatCaptureTest(
         }
       }
       guard let expect = expect else {
-        throw "Match succeeded where failure expected"
+        throw "Match of \(test) succeeded where failure expected in \(regex)"
       }
       let capStrs = caps.map { $0 == nil ? nil : String($0!) }
       guard expect.count == capStrs.count else {
@@ -98,7 +100,7 @@ func flatCaptureTest(
       }
     } catch {
       if !xfail {
-        XCTFail("\(error)")
+        XCTFail("\(error)", file: file, line: line)
       }
     }
   }
@@ -113,7 +115,9 @@ func matchTest(
   syntax: SyntaxOptions = .traditional,
   enableTracing: Bool = false,
   dumpAST: Bool = false,
-  xfail: Bool = false
+  xfail: Bool = false,
+  file: StaticString = #file,
+  line: UInt = #line
 ) {
   for (test, expect) in tests {
     firstMatchTest(
@@ -123,7 +127,9 @@ func matchTest(
       syntax: syntax,
       enableTracing: enableTracing,
       dumpAST: dumpAST,
-      xfail: xfail)
+      xfail: xfail,
+      file: file,
+      line: line)
   }
 }
 
@@ -310,6 +316,10 @@ extension RegexTests {
       #"xa{0}y"#, input: "123aaaxyz", match: "xy")
     firstMatchTest(
       #"xa{0,0}y"#, input: "123aaaxyz", match: "xy")
+    firstMatchTest(
+      #"(a|a){2}a"#, input: "123aaaxyz", match: "aaa")
+    firstMatchTest(
+      #"(a|a){3}a"#, input: "123aaaxyz", match: nil)
 
     firstMatchTest("a.*", input: "dcba", match: "a")
 
@@ -573,10 +583,7 @@ extension RegexTests {
     firstMatchTest("[[:isALNUM:]]", input: "[[:alnum:]]", match: "a")
     firstMatchTest("[[:AL_NUM:]]", input: "[[:alnum:]]", match: "a")
 
-    // Unfortunately, scripts are not part of stdlib...
-    firstMatchTest(
-      "[[:script=Greek:]]", input: "123αβγxyz", match: "α",
-      xfail: true)
+    firstMatchTest("[[:script=Greek:]]", input: "123αβγxyz", match: "α")
 
     // MARK: Operators
 
@@ -677,34 +684,17 @@ extension RegexTests {
     firstMatchTest(#"\p{ascii}"#, input: "123abcXYZ", match: "1")
     firstMatchTest(#"\p{isAny}"#, input: "123abcXYZ", match: "1")
 
-    // Unfortunately, scripts are not part of stdlib...
-    firstMatchTest(
-      #"\p{sc=grek}"#, input: "123αβγxyz", match: "α",
-      xfail: true)
-    firstMatchTest(
-      #"\p{sc=isGreek}"#, input: "123αβγxyz", match: "α",
-      xfail: true)
-    firstMatchTest(
-      #"\p{Greek}"#, input: "123αβγxyz", match: "α",
-      xfail: true)
-    firstMatchTest(
-      #"\p{isGreek}"#, input: "123αβγxyz", match: "α",
-      xfail: true)
-    firstMatchTest(
-      #"\P{Script=Latn}"#, input: "abcαβγxyz", match: "α",
-      xfail: true)
-    firstMatchTest(
-      #"\p{script=Greek}"#, input: "123αβγxyz", match: "α",
-      xfail: true)
-    firstMatchTest(
-      #"\p{ISscript=isGreek}"#, input: "123αβγxyz", match: "α",
-      xfail: true)
-    firstMatchTest(
-      #"\p{scx=bamum}"#, input: "123ꚠꚡꚢxyz", match: "ꚠ",
-      xfail: true)
-    firstMatchTest(
-      #"\p{ISBAMUM}"#, input: "123ꚠꚡꚢxyz", match: "ꚠ",
-      xfail: true)
+    firstMatchTest(#"\p{sc=grek}"#, input: "123αβγxyz", match: "α")
+    firstMatchTest(#"\p{sc=isGreek}"#, input: "123αβγxyz", match: "α")
+    firstMatchTest(#"\p{Greek}"#, input: "123αβγxyz", match: "α")
+    firstMatchTest(#"\p{isGreek}"#, input: "123αβγxyz", match: "α")
+    firstMatchTest(#"\P{Script=Latn}"#, input: "abcαβγxyz", match: "α")
+    firstMatchTest(#"\p{script=Greek}"#, input: "123αβγxyz", match: "α")
+    firstMatchTest(#"\p{ISscript=isGreek}"#, input: "123αβγxyz", match: "α")
+    firstMatchTest(#"\p{scx=bamum}"#, input: "123ꚠꚡꚢxyz", match: "ꚠ")
+    firstMatchTest(#"\p{ISBAMUM}"#, input: "123ꚠꚡꚢxyz", match: "ꚠ")
+    firstMatchTest(#"\p{Script=Unknown}"#, input: "\u{10FFFF}", match: "\u{10FFFF}")
+    firstMatchTest(#"\p{scx=Gujr}"#, input: "\u{a839}", match: "\u{a839}")
 
     firstMatchTest(#"\p{alpha}"#, input: "123abcXYZ", match: "a")
     firstMatchTest(#"\P{alpha}"#, input: "123abcXYZ", match: "1")
@@ -1011,6 +1001,13 @@ extension RegexTests {
       ("abbbe", nil),
       ("accce", nil),
       ("abcbbd", nil))
+    flatCaptureTest(
+      #"(?:\w\1|:(\w):)+"#,
+      (":a:bacada", ["a"]),
+      (":a:baca:o:boco", ["o"]),
+      ("bacada", nil),
+      (":a:boco", ["a"])          // this matches only the ':a:' prefix
+    )
   }
 
   func testMatchReferences() {
@@ -1115,6 +1112,43 @@ extension RegexTests {
   func testSingleLineMode() {
     firstMatchTest(#".+"#, input: "a\nb", match: "a")
     firstMatchTest(#"(?s:.+)"#, input: "a\nb", match: "a\nb")
+  }
+  
+  func testCaseSensitivity() {
+    matchTest(
+      #"c..e"#,
+      ("cafe", true),
+      ("Cafe", false))
+    matchTest(
+      #"(?i)c.f."#,
+      ("cafe", true),
+      ("Cafe", true),
+      ("caFe", true))
+    matchTest(
+      #"(?i)cafe"#,
+      ("cafe", true),
+      ("Cafe", true),
+      ("caFe", true))
+    matchTest(
+      #"(?i)café"#,
+      ("café", true),
+      ("CafÉ", true))
+    matchTest(
+      #"(?i)\u{63}af\u{e9}"#,
+      ("café", true),
+      ("CafÉ", true))
+    
+    matchTest(
+      #"[caFE]{4}"#,
+      ("cafe", false),
+      ("CAFE", false),
+      ("caFE", true),
+      ("EFac", true))
+    matchTest(
+      #"(?i)[caFE]{4}"#,
+      ("cafe", true),
+      ("CaFe", true),
+      ("EfAc", true))
   }
   
   func testMatchingOptionsScope() {

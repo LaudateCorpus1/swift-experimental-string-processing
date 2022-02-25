@@ -12,10 +12,16 @@
 import XCTest
 @testable import _StringProcessing
 
+func dynCap(
+  _ s: String, optional: Bool = false
+) -> StoredDynamicCapture {
+  StoredDynamicCapture(s[...], optionalCount: optional ? 1 : 0)
+}
+
 class RegexDSLTests: XCTestCase {
   func _testDSLCaptures<Content: RegexProtocol, CaptureType>(
     _ tests: (input: String, expectedCaptures: CaptureType?)...,
-    captureType: CaptureType.Type,
+    matchType: CaptureType.Type,
     _ equivalence: (CaptureType, CaptureType) -> Bool,
     file: StaticString = #file,
     line: UInt = #line,
@@ -57,7 +63,7 @@ class RegexDSLTests: XCTestCase {
   func testCharacterClasses() throws {
     try _testDSLCaptures(
       ("a c", ("a c", " ", "c")),
-      captureType: (Substring, Substring, Substring).self, ==)
+      matchType: (Substring, Substring, Substring).self, ==)
     {
       .any
       capture(.whitespace) // Substring
@@ -140,7 +146,7 @@ class RegexDSLTests: XCTestCase {
   func testCombinators() throws {
     try _testDSLCaptures(
       ("aaaabccccdddkj", ("aaaabccccdddkj", "b", "cccc", "d", "k", nil, "j")),
-      captureType: (Substring, Substring, Substring, Substring, Substring, Substring?, Substring?).self, ==)
+      matchType: (Substring, Substring, Substring, Substring, Substring, Substring?, Substring?).self, ==)
     {
       "a".+
       capture(oneOrMore(Character("b"))) // Substring
@@ -152,10 +158,55 @@ class RegexDSLTests: XCTestCase {
     }
   }
   
+  func testOptions() throws {
+    try _testDSLCaptures(
+      ("abc", "abc"),
+      ("ABC", "ABC"),
+      ("abcabc", "abcabc"),
+      ("abcABCaBc", "abcABCaBc"),
+      matchType: Substring.self, ==) {
+        oneOrMore {
+          "abc"
+        }.caseSensitive(false)
+      }
+    
+    // Multiple options on one component wrap successively, but do not
+    // override - equivalent to each option attached to a wrapping `Regex`.
+    try _testDSLCaptures(
+      ("abc", "abc"),
+      ("ABC", "ABC"),
+      ("abcabc", "abcabc"),
+      ("abcABCaBc", "abcABCaBc"),
+      matchType: Substring.self, ==) {
+        oneOrMore {
+          "abc"
+        }
+        .caseSensitive(false)
+        .caseSensitive(true)
+      }
+
+    // An option on an outer component doesn't override an option set on an
+    // inner component.
+    try _testDSLCaptures(
+      ("abc", "abc"),
+      ("ABC", "ABC"),
+      ("ABCde", "ABCde"),
+      ("ABCDE", nil),
+      ("abcabc", "abcabc"),
+      ("abcdeABCdeaBcde", "abcdeABCdeaBcde"),
+      matchType: Substring.self, ==) {
+        oneOrMore {
+          "abc".caseSensitive(false)
+          optionally("de")
+        }
+        .caseSensitive(true)
+      }
+  }
+  
   func testQuantificationBehavior() throws {
     try _testDSLCaptures(
       ("abc1def2", ("abc1def2", "2")),
-      captureType: (Substring, Substring).self, ==)
+      matchType: (Substring, Substring).self, ==)
     {
       oneOrMore {
         oneOrMore(.word)
@@ -165,7 +216,7 @@ class RegexDSLTests: XCTestCase {
 
     try _testDSLCaptures(
       ("abc1def2", ("abc1def2", "2")),
-      captureType: (Substring, Substring).self, ==)
+      matchType: (Substring, Substring).self, ==)
     {
       oneOrMore {
         oneOrMore(.word, .reluctantly)
@@ -175,7 +226,7 @@ class RegexDSLTests: XCTestCase {
 
     try _testDSLCaptures(
       ("abc1def2", ("abc1def2", "2")),
-      captureType: (Substring, Substring).self, ==)
+      matchType: (Substring, Substring).self, ==)
     {
       oneOrMore {
         oneOrMore(.reluctantly) {
@@ -187,7 +238,7 @@ class RegexDSLTests: XCTestCase {
     
     try _testDSLCaptures(
       ("abc1def2", "abc1def2"),
-      captureType: Substring.self, ==)
+      matchType: Substring.self, ==)
     {
       repeating(2...) {
         repeating(count: 3) {
@@ -205,7 +256,7 @@ class RegexDSLTests: XCTestCase {
       ("aaabbbcccddddddeeefff", nil),
       ("aaabbbcccdddefff", nil),
       ("aaabbbcccdddeee", "aaabbbcccdddeee"),
-      captureType: Substring.self, ==)
+      matchType: Substring.self, ==)
     {
       repeating(count: 3) { "a" }
       repeating(1...) { "b" }
@@ -213,6 +264,33 @@ class RegexDSLTests: XCTestCase {
       repeating(..<5) { "d" }
       repeating(2...) { "e" }
       repeating(0...) { "f" }
+    }
+  }
+  
+  func testAssertions() throws {
+    try _testDSLCaptures(
+      ("aaaaab", "aaaaab"),
+      ("caaaaab", nil),
+      ("aaaaabc", nil),
+      matchType: Substring.self, ==)
+    {
+      Anchor.startOfLine
+      "a".+
+      "b"
+      Anchor.endOfLine
+    }
+    
+    try _testDSLCaptures(
+      ("aaaaa1", "aaaaa1"),
+      ("aaaaa2", nil),
+      ("aaaaa", nil),
+      ("aaaaab", nil),
+      matchType: Substring.self, ==)
+    {
+      "a".+
+      lookahead(CharacterClass.digit)
+      lookahead("2", negative: true)
+      CharacterClass.word
     }
   }
 
@@ -224,7 +302,7 @@ class RegexDSLTests: XCTestCase {
     /*
     try _testDSLCaptures(
       ("aaaabccccddd", ("aaaabccccddd", [("b", "cccc", ["d", "d", "d"])])),
-      captureType: (Substring, [(Substring, Substring, [Substring])]).self, ==)
+      matchType: (Substring, [(Substring, Substring, [Substring])]).self, ==)
     {
       "a".+
       oneOrMore {
@@ -270,7 +348,7 @@ class RegexDSLTests: XCTestCase {
     try _testDSLCaptures(
       ("aaa 123 apple orange apple", ("aaa 123 apple orange apple", 123, .apple)),
       ("aaa     ", ("aaa     ", nil, nil)),
-      captureType: (Substring, Int?, Word?).self, ==)
+      matchType: (Substring, Int?, Word?).self, ==)
     {
       "a".+
       oneOrMore(.whitespace)
@@ -466,9 +544,10 @@ class RegexDSLTests: XCTestCase {
       let regex = try Regex("aabcc.")
       let line = "aabccd"
       let captures = try XCTUnwrap(line.match(regex)?.1)
-      XCTAssertEqual(captures, .empty)
+      XCTAssertEqual(captures, [])
     }
     do {
+
       let regex = try Regex(
         #"([0-9A-F]+)(?:\.\.([0-9A-F]+))?\s+;\s+(\w+).*"#)
       let line = """
@@ -478,10 +557,89 @@ class RegexDSLTests: XCTestCase {
       let captures = try XCTUnwrap(line.match(regex)?.1)
       XCTAssertEqual(
         captures,
-        .tuple([
-          .substring("A6F0"),
-          .optional(.substring("A6F1")),
-          .substring("Extend")]))
+        [
+          dynCap("A6F0"),
+          dynCap("A6F1", optional: true),
+          dynCap("Extend"),
+        ])
+    }
+  }
+
+  func testBackreference() throws {
+    try _testDSLCaptures(
+      ("abc#41#42abcabcabc", ("abc#41#42abcabcabc", "abc", 42, "abc", nil)),
+      matchType: (Substring, Substring, Int?, Substring?, Substring?).self, ==)
+    {
+      let a = Reference(Substring.self)
+      let b = Reference(Int.self)
+      capture("abc", as: a)
+      zeroOrMore {
+        tryCapture(as: b) {
+          "#"
+          oneOrMore(.digit)
+        } transform: {
+          Int($0.dropFirst())
+        }
+      }
+      a
+      zeroOrMore {
+        capture(a)
+      }
+      optionally {
+        "b"
+        capture(a)
+      }
+    }
+
+    // Match result referencing a `Reference`.
+    do {
+      let a = Reference(Substring.self)
+      let b = Reference(Int.self)
+      let regex = Regex {
+        capture("abc", as: a)
+        zeroOrMore {
+          tryCapture(as: b) {
+            "#"
+            oneOrMore(.digit)
+          } transform: {
+            Int($0.dropFirst())
+          }
+        }
+        a
+        zeroOrMore {
+          capture(b)
+        }
+        optionally {
+          capture(a)
+        }
+      }
+      let input = "abc#41#42abc#42#42"
+      let result = try XCTUnwrap(input.match(regex))
+      XCTAssertEqual(result[a], "abc")
+      XCTAssertEqual(result[b], 42)
+    }
+
+    // Post-hoc captured references
+    // #"(?:\w\1|:(\w):)+"#
+    try _testDSLCaptures(
+      (":a:baca:o:boco", (":a:baca:o:boco", "o")),
+      matchType: (Substring, Substring).self,
+      ==
+    ) {
+      oneOrMore {
+        let a = Reference(Substring.self)
+        choiceOf {
+          Regex {
+            .word
+            a
+          }
+          Regex {
+            ":"
+            capture(.word, as: a)
+            ":"
+          }
+        }
+      }
     }
   }
 }
@@ -497,13 +655,6 @@ extension Unicode.Scalar {
 }
 
 // MARK: Extra == functions
-
-// (Substring, [(Substring, Substring, [Substring])])
-typealias S_AS = (Substring, [(Substring, Substring, [Substring])])
-
-func ==(lhs: S_AS, rhs: S_AS) -> Bool {
-  lhs.0 == rhs.0 && lhs.1.elementsEqual(rhs.1, by: ==)
-}
 
 func == <T0: Equatable, T1: Equatable, T2: Equatable, T3: Equatable, T4: Equatable, T5: Equatable, T6: Equatable>(
   l: (T0, T1, T2, T3, T4, T5, T6), r: (T0, T1, T2, T3, T4, T5, T6)

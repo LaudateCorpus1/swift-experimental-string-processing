@@ -11,6 +11,7 @@
 
 import _MatchingEngine
 
+  // FIXME: Public for prototype
 public struct Executor {
   // TODO: consider let, for now lets us toggle tracing
   var engine: Engine<String>
@@ -19,24 +20,55 @@ public struct Executor {
     self.engine = Engine(program, enableTracing: enablesTracing)
   }
 
+  // FIXME: Public for prototype
+  public struct Result {
+    public var range: Range<String.Index>
+    var captures: [StructuredCapture]
+    var referencedCaptureOffsets: [ReferenceID: Int]
+
+    var destructure: (
+      matched: Range<String.Index>,
+      captures: [StructuredCapture],
+      referencedCaptureOffsets: [ReferenceID: Int]
+    ) {
+      (range, captures, referencedCaptureOffsets)
+    }
+
+    init(
+      _ matched: Range<String.Index>, _ captures: [StructuredCapture],
+      _ referencedCaptureOffsets: [ReferenceID: Int]
+    ) {
+      self.range = matched
+      self.captures = captures
+      self.referencedCaptureOffsets = referencedCaptureOffsets
+    }
+  }
+
   public func execute(
     input: String,
     in range: Range<String.Index>,
     mode: MatchMode = .wholeString
-  ) -> MatchResult? {
+  ) -> Result? {
     guard let (endIdx, capList) = engine.consume(
       input, in: range, matchMode: mode
     ) else {
       return nil
     }
     let capStruct = engine.program.captureStructure
-    let caps = try! capStruct.structuralize(capList, input)
-    return MatchResult(range.lowerBound..<endIdx, caps)
+    do {
+      let range = range.lowerBound..<endIdx
+
+      let caps = try capStruct.structuralize(
+        capList, input)
+      return Result(range, caps, capList.referencedCaptureOffsets)
+    } catch {
+      fatalError(String(describing: error))
+    }
   }
   public func execute(
     input: Substring,
     mode: MatchMode = .wholeString
-  ) -> MatchResult? {
+  ) -> Result? {
     self.execute(
       input: input.base,
       in: input.startIndex..<input.endIndex,
@@ -53,15 +85,5 @@ public struct Executor {
     ).map { endIndex, capture in
       (range.lowerBound..<endIndex, capture)
     }
-  }
-}
-
-// Backward compatibility layer. To be removed when we deprecate legacy
-// components.
-extension Executor: VirtualMachine {
-  static let motto = "Executor"
-
-  init(program: Program) {
-    self.init(program: program, enablesTracing: false)
   }
 }

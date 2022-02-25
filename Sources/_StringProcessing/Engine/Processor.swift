@@ -14,6 +14,8 @@ public enum MatchMode {
   case partialFromFront
 }
 
+typealias Program = MEProgram<String>
+
 /// A concrete CU. Somehow will run the concrete logic and
 /// feed stuff back to generic code
 struct Controller {
@@ -163,7 +165,7 @@ extension Processor {
   }
 
   mutating func signalFailure() {
-    guard let (pc, pos, stackEnd, capEnds) =
+    guard let (pc, pos, stackEnd, capEnds, intRegisters) =
             savePoints.popLast()?.destructure
     else {
       state = .fail
@@ -175,7 +177,8 @@ extension Processor {
     controller.pc = pc
     currentPosition = pos ?? currentPosition
     callStack.removeLast(callStack.count - stackEnd.rawValue)
-      storedCaptures = capEnds
+    storedCaptures = capEnds
+    registers.ints = intRegisters
   }
 
   mutating func tryAccept() {
@@ -358,6 +361,19 @@ extension Processor {
       }
       controller.step()
 
+    case .matchBy:
+      let (matcherReg, valReg) = payload.pairedMatcherValue
+      let matcher = registers[matcherReg]
+      guard let (nextIdx, val) = matcher(
+        input, currentPosition, bounds
+      ) else {
+        signalFailure()
+        return
+      }
+      registers[valReg] = val
+      advance(to: nextIdx)
+      controller.step()
+
     case .print:
       // TODO: Debug stream
       doPrint(registers[payload.string])
@@ -423,6 +439,16 @@ extension Processor {
       storedCaptures[capNum].registerValue(value)
 
       controller.step()
+
+    case .captureValue:
+      let (val, cap) = payload.pairedValueCapture
+      let value = registers[val]
+      let capNum = Int(asserting: cap.rawValue)
+      let sp = makeSavePoint(self.currentPC)
+      storedCaptures[capNum].registerValue(
+        value, overwriteInitial: sp)
+      controller.step()
     }
+
   }
 }

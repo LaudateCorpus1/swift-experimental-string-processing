@@ -17,6 +17,8 @@ public struct MEProgram<Input: Collection> where Input.Element: Equatable {
     (Input, Input.Index, Range<Input.Index>) -> Bool
   public typealias TransformFunction =
     (Input, Range<Input.Index>) -> Any?
+  public typealias MatcherFunction =
+    (Input, Input.Index, Range<Input.Index>) -> (Input.Index, Any)?
 
   var instructions: InstructionList<Instruction>
 
@@ -26,12 +28,14 @@ public struct MEProgram<Input: Collection> where Input.Element: Equatable {
   var staticConsumeFunctions: [ConsumeFunction]
   var staticAssertionFunctions: [AssertionFunction]
   var staticTransformFunctions: [TransformFunction]
+  var staticMatcherFunctions: [MatcherFunction]
 
   var registerInfo: RegisterInfo
 
   var enableTracing: Bool = false
 
   let captureStructure: CaptureStructure
+  let referencedCaptureOffsets: [ReferenceID: Int]
 }
 
 extension MEProgram: CustomStringConvertible {

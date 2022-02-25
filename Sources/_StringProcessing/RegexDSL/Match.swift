@@ -11,8 +11,25 @@
 
 @dynamicMemberLookup
 public struct RegexMatch<Match> {
+  let input: String
   public let range: Range<String.Index>
-  public let match: Match
+  let rawCaptures: [StructuredCapture]
+  let referencedCaptureOffsets: [ReferenceID: Int]
+
+  public var match: Match {
+    if Match.self == (Substring, DynamicCaptures).self {
+      // FIXME(rdar://89449323): Compiler assertion
+      let input = input
+      let dynCaps = rawCaptures.map { StoredDynamicCapture($0, in: input) }
+      return (input[range], dynCaps) as! Match
+    } else if Match.self == Substring.self {
+      // FIXME: Plumb whole match (`.0`) through the matching engine.
+      return input[range] as! Match
+    } else {
+      let typeErasedMatch = rawCaptures.existentialMatch(from: input[range])
+      return typeErasedMatch as! Match
+    }
+  }
 
   public subscript<T>(dynamicMember keyPath: KeyPath<Match, T>) -> T {
     match[keyPath: keyPath]
@@ -24,6 +41,15 @@ public struct RegexMatch<Match> {
     dynamicMember keyPath: KeyPath<(Match, _doNotUse: ()), Match>
   ) -> Match {
     match
+  }
+
+  public subscript<Capture>(_ reference: Reference<Capture>) -> Capture {
+    guard let offset = referencedCaptureOffsets[reference.id] else {
+      preconditionFailure(
+        "Reference did not capture any match in the regex")
+    }
+    return rawCaptures[offset].existentialMatchComponent(from: input[...])
+      as! Capture
   }
 }
 
@@ -37,54 +63,22 @@ extension RegexProtocol {
       input.base, in: input.startIndex..<input.endIndex)
   }
 
-  // TODO: Should we expose parameters for testing?
-  // Currently, tests just use the execution interface directly.
-  func _performLegacyMatch(
-    _ input: String,
-    in inputRange: Range<String.Index>,
-    mode: MatchMode
-  ) -> RegexMatch<Match>? {
-    let vm = HareVM(program: regex.program.legacyLoweredProgram)
-    guard let (range, captures) = vm.execute(
-      input: input, in: inputRange, mode: mode
-    )?.destructure else {
-      return nil
-    }
-    let convertedMatch: Match
-    if Match.self == (Substring, DynamicCaptures).self {
-      convertedMatch = (input[range], DynamicCaptures(captures)) as! Match
-    } else {
-      let typeErasedMatch = captures.matchValue(
-        withWholeMatch: input[range]
-      )
-      convertedMatch = typeErasedMatch as! Match
-    }
-    return RegexMatch(range: range, match: convertedMatch)
-  }
-
   func _match(
     _ input: String,
     in inputRange: Range<String.Index>,
     mode: MatchMode = .wholeString
   ) -> RegexMatch<Match>? {
     let executor = Executor(program: regex.program.loweredProgram)
-    guard let (range, captures) = executor.execute(
+    guard let (range, captures, captureOffsets) = executor.execute(
       input: input, in: inputRange, mode: mode
     )?.destructure else {
       return nil
     }
-    let convertedMatch: Match
-    if Match.self == (Substring, DynamicCaptures).self {
-      convertedMatch = (input[range], DynamicCaptures(captures)) as! Match
-    } else if Match.self == Substring.self {
-      convertedMatch = input[range] as! Match
-    } else {
-      let typeErasedMatch = captures.matchValue(
-        withWholeMatch: input[range]
-      )
-      convertedMatch = typeErasedMatch as! Match
-    }
-    return RegexMatch(range: range, match: convertedMatch)
+    return RegexMatch(
+      input: input,
+      range: range,
+      rawCaptures: captures,
+      referencedCaptureOffsets: captureOffsets)
   }
 }
 
