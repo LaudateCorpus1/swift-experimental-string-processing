@@ -9,7 +9,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-public struct TwoWaySearcher<Searched: BidirectionalCollection>
+struct TwoWaySearcher<Searched: BidirectionalCollection>
   where Searched.Element: Comparable
 {
   // TODO: Be generic over the pattern?
@@ -24,7 +24,7 @@ public struct TwoWaySearcher<Searched: BidirectionalCollection>
     let (criticalIndex, periodOfSecondPart) = pattern._criticalFactorization(<)
     let periodIsExact = pattern[criticalIndex...]
       .prefix(periodOfSecondPart)
-      .ends(with: pattern[..<criticalIndex])
+      ._ends(with: pattern[..<criticalIndex])
     
     self.pattern = pattern
     self.criticalIndex = criticalIndex
@@ -36,19 +36,21 @@ public struct TwoWaySearcher<Searched: BidirectionalCollection>
 }
 
 extension TwoWaySearcher: CollectionSearcher {
-  public struct State {
+  struct State {
     let end: Searched.Index
     var index: Searched.Index
     var criticalIndex: Searched.Index
     var memory: (offset: Int, index: Searched.Index)?
   }
   
-  public func state(
+  func state(
     for searched: Searched,
     in range: Range<Searched.Index>
   ) -> State {
+    // FIXME: Is this 'limitedBy' requirement a sign of error?
     let criticalIndex = searched.index(
-      range.lowerBound, offsetBy: criticalIndex)
+      range.lowerBound, offsetBy: criticalIndex, limitedBy: range.upperBound)
+      ?? range.upperBound
     return State(
       end: range.upperBound,
       index: range.lowerBound,
@@ -57,7 +59,7 @@ extension TwoWaySearcher: CollectionSearcher {
       memory: nil)
   }
 
-  public func search(
+  func search(
     _ searched: Searched,
     _ state: inout State
   ) -> Range<Searched.Index>? {
@@ -66,7 +68,10 @@ extension TwoWaySearcher: CollectionSearcher {
          let start = _searchLeft(searched, &state, end)
       {
         state.index = end
-        state.criticalIndex = searched.index(end, offsetBy: criticalIndex)
+        // FIXME: Is this 'limitedBy' requirement a sign of error?
+        state.criticalIndex = searched.index(
+          end, offsetBy: criticalIndex, limitedBy: searched.endIndex)
+          ?? searched.endIndex
         state.memory = nil
         return start..<end
       }

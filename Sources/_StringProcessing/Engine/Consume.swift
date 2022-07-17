@@ -13,58 +13,44 @@ var checkComments = true
 
 extension Engine {
   func makeProcessor(
-    input: Input, bounds: Range<Input.Index>, matchMode: MatchMode
-  ) -> Processor<Input> {
+    input: String, bounds: Range<String.Index>, matchMode: MatchMode
+  ) -> Processor {
     Processor(
       program: program,
       input: input,
-      bounds: bounds,
+      subjectBounds: bounds,
+      searchBounds: bounds,
       matchMode: matchMode,
+      isTracingEnabled: enableTracing)
+  }
+  
+  func makeFirstMatchProcessor(
+    input: String,
+    subjectBounds: Range<String.Index>,
+    searchBounds: Range<String.Index>
+  ) -> Processor {
+    Processor(
+      program: program,
+      input: input,
+      subjectBounds: subjectBounds,
+      searchBounds: searchBounds,
+      matchMode: .partialFromFront,
       isTracingEnabled: enableTracing)
   }
 }
 
-extension Engine where Input == String {
-  public func consume(
-    _ input: Input
-  ) -> (Input.Index, CaptureList)? {
-    consume(input, in: input.startIndex ..< input.endIndex)
-  }
-
-  public func consume(
-    _ input: Input,
-    in range: Range<Input.Index>,
-    matchMode: MatchMode = .partialFromFront
-  ) -> (Input.Index, CaptureList)? {
-    if enableTracing {
-      print("Consume: \(input)")
-    }
-
-    var cpu = makeProcessor(input: input, bounds: range, matchMode: matchMode)
-    let result: Input.Index? = {
-      while true {
-        switch cpu.state {
-        case .accept:
-          return cpu.currentPosition
-        case .fail:
-          return nil
-        case .inProgress: cpu.cycle()
-        }
-      }
-    }()
-
-    if enableTracing {
-      if let idx = result {
-        print("Result: \(input[..<idx]) | \(input[idx...])")
-      } else {
-        print("Result: nil")
+extension Processor {
+  // TODO: Should we throw here?
+  mutating func consume() -> Input.Index? {
+    while true {
+      switch self.state {
+      case .accept:
+        return self.currentPosition
+      case .fail:
+        return nil
+      case .inProgress: self.cycle()
       }
     }
-    guard let result = result else { return nil }
-
-    let capList = cpu.storedCaptures
-    return (result, CaptureList(
-      values: capList, referencedCaptureOffsets: program.referencedCaptureOffsets))
   }
 }
 

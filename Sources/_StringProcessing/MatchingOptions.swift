@@ -9,7 +9,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-import _MatchingEngine
+@_implementationOnly import _RegexParser
 
 /// A type that represents the current state of regex matching options, with
 /// stack-based scoping.
@@ -22,6 +22,9 @@ struct MatchingOptions {
     // Must contain exactly one of each mutually exclusive group
     assert(stack.last!.intersection(.textSegmentOptions).rawValue.nonzeroBitCount == 1)
     assert(stack.last!.intersection(.semanticMatchingLevels).rawValue.nonzeroBitCount == 1)
+    
+    // Must contain at most one quantifier behavior
+    assert(stack.last!.intersection(.repetitionBehaviors).rawValue.nonzeroBitCount <= 1)
   }
 }
 
@@ -51,6 +54,13 @@ extension MatchingOptions {
     stack[stack.count - 1].apply(sequence)
     _invariantCheck()
   }
+  
+  // @testable
+  /// Returns true if the options at the top of `stack` are equal to those
+  /// for `other`.
+  func _equal(to other: MatchingOptions) -> Bool {
+    stack.last == other.stack.last
+  }
 }
 
 // MARK: Matching behavior API
@@ -63,15 +73,46 @@ extension MatchingOptions {
     stack.last!.contains(.reluctantByDefault)
   }
   
+  var defaultQuantificationKind: AST.Quantification.Kind {
+    if stack.last!.contains(.possessiveByDefault) {
+      return .possessive
+    } else if stack.last!.contains(.reluctantByDefault) {
+      return .reluctant
+    } else {
+      return .eager
+    }
+  }
+  
   var dotMatchesNewline: Bool {
     stack.last!.contains(.singleLine)
+  }
+  
+  var anchorsMatchNewlines: Bool {
+    stack.last!.contains(.multiline)
+  }
+  
+  var usesASCIIWord: Bool {
+    stack.last!.contains(.asciiOnlyWord)
+      || stack.last!.contains(.asciiOnlyPOSIXProps)
+  }
+  
+  var usesASCIIDigits: Bool {
+    stack.last!.contains(.asciiOnlyDigit)
+      || stack.last!.contains(.asciiOnlyPOSIXProps)
+  }
+  
+  var usesASCIISpaces: Bool {
+    stack.last!.contains(.asciiOnlySpace)
+      || stack.last!.contains(.asciiOnlyPOSIXProps)
+  }
+  
+  var usesSimpleUnicodeBoundaries: Bool {
+    !stack.last!.contains(.unicodeWordBoundaries)
   }
   
   enum SemanticLevel {
     case graphemeCluster
     case unicodeScalar
-    // TODO: include?
-    // case byte
   }
   
   var semanticLevel: SemanticLevel {
@@ -83,8 +124,7 @@ extension MatchingOptions {
 
 // Deprecated CharacterClass.MatchLevel API
 extension MatchingOptions {
-  @available(*, deprecated)
-  var matchLevel: CharacterClass.MatchLevel {
+  var matchLevel: _CharacterClassModel.MatchLevel {
     switch semanticLevel {
     case .graphemeCluster:
       return .graphemeCluster
@@ -94,6 +134,7 @@ extension MatchingOptions {
   }
 }
 
+// MARK: - Implementation
 extension MatchingOptions {
   /// An option that changes the behavior of a regular expression.
   fileprivate enum Option: Int {
@@ -101,7 +142,7 @@ extension MatchingOptions {
     case caseInsensitive
     case allowDuplicateGroupNames
     case multiline
-    case noAutoCapture
+    case namedCapturesOnly
     case singleLine
     case reluctantByDefault
 
@@ -129,6 +170,9 @@ extension MatchingOptions {
     case unicodeScalarSemantics
     case byteSemantics
     
+    // Swift-only default possessive quantifier
+    case possessiveByDefault
+
     init?(_ astKind: AST.MatchingOption.Kind) {
       switch astKind {
       case .caseInsensitive:
@@ -137,8 +181,8 @@ extension MatchingOptions {
         self = .allowDuplicateGroupNames
       case .multiline:
         self = .multiline
-      case .noAutoCapture:
-        self = .noAutoCapture
+      case .namedCapturesOnly:
+        self = .namedCapturesOnly
       case .singleLine:
         self = .singleLine
       case .reluctantByDefault:
@@ -163,12 +207,11 @@ extension MatchingOptions {
         self = .unicodeScalarSemantics
       case .byteSemantics:
         self = .byteSemantics
+      case .possessiveByDefault:
+        self = .possessiveByDefault
         
       // Whitespace options are only relevant during parsing, not compilation.
       case .extended, .extraExtended:
-        return nil
-      @unknown default:
-        // Ignore unknown 
         return nil
       }
     }
@@ -198,6 +241,9 @@ extension MatchingOptions {
       if Self.textSegmentOptions.contains(opt.representation) {
         remove(.textSegmentOptions)
       }
+      if Self.repetitionBehaviors.contains(opt.representation) {
+        remove(.repetitionBehaviors)
+      }
 
       insert(opt.representation)
     }
@@ -219,6 +265,9 @@ extension MatchingOptions {
       for opt in sequence.removing {
         guard let opt = Option(opt.kind) else {
           continue
+        }
+        if Self.repetitionBehaviors.contains(opt.representation) {
+          remove(.repetitionBehaviors)
         }
         remove(opt.representation)
       }
@@ -253,10 +302,21 @@ extension MatchingOptions.Representation {
   static var semanticMatchingLevels: Self {
     [.graphemeClusterSemantics, .unicodeScalarSemantics, .byteSemantics]
   }
-    
+  
+  // Quantification behavior options
+  static var reluctantByDefault: Self { .init(.reluctantByDefault) }
+  static var possessiveByDefault: Self { .init(.possessiveByDefault) }
+
+  static var repetitionBehaviors: Self {
+    [.reluctantByDefault, .possessiveByDefault]
+  }
+  
+  // Uses level 2 Unicode word boundaries
+  static var unicodeWordBoundaries: Self { .init(.unicodeWordBoundaries) }
+  
   /// The default set of options.
   static var `default`: Self {
-    [.graphemeClusterSemantics, .textSegmentGraphemeMode]
+    [.graphemeClusterSemantics, .textSegmentGraphemeMode, .unicodeWordBoundaries]
   }
 }
 

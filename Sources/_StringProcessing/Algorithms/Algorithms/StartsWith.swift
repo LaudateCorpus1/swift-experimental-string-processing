@@ -12,7 +12,7 @@
 // MARK: `CollectionConsumer` algorithms
 
 extension Collection {
-  public func starts<C: CollectionConsumer>(with consumer: C) -> Bool
+  func _starts<C: CollectionConsumer>(with consumer: C) -> Bool
     where C.Consumed == SubSequence
   {
     consumer.consuming(self[...]) != nil
@@ -20,7 +20,7 @@ extension Collection {
 }
 
 extension BidirectionalCollection {
-  public func ends<C: BidirectionalCollectionConsumer>(with consumer: C) -> Bool
+  func _ends<C: BidirectionalCollectionConsumer>(with consumer: C) -> Bool
     where C.Consumed == SubSequence
   {
     consumer.consumingBack(self[...]) != nil
@@ -30,29 +30,36 @@ extension BidirectionalCollection {
 // MARK: Fixed pattern algorithms
 
 extension Collection where Element: Equatable {
-  public func starts<C: Collection>(with prefix: C) -> Bool
+  func _starts<C: Collection>(with prefix: C) -> Bool
     where C.Element == Element
   {
-    starts(with: FixedPatternConsumer(pattern: prefix))
+    _starts(with: FixedPatternConsumer(pattern: prefix))
   }
 }
 
 extension BidirectionalCollection where Element: Equatable {
-  public func ends<C: BidirectionalCollection>(with suffix: C) -> Bool
+  func _ends<C: BidirectionalCollection>(with suffix: C) -> Bool
     where C.Element == Element
   {
-    ends(with: FixedPatternConsumer(pattern: suffix))
+    _ends(with: FixedPatternConsumer(pattern: suffix))
   }
 }
 
 // MARK: Regex algorithms
 
+@available(SwiftStdlib 5.7, *)
 extension BidirectionalCollection where SubSequence == Substring {
-  public func starts<R: RegexProtocol>(with regex: R) -> Bool {
-    starts(with: RegexConsumer(regex))
+  /// Returns a Boolean value indicating whether the initial elements of the
+  /// sequence are the same as the elements in the specified regex.
+  ///
+  /// - Parameter regex: A regex to compare to this sequence.
+  /// - Returns: `true` if the initial elements of the sequence matches the
+  ///   beginning of `regex`; otherwise, `false`.
+  public func starts(with regex: some RegexComponent) -> Bool {
+    _starts(with: RegexConsumer(regex))
   }
   
-  public func ends<R: RegexProtocol>(with regex: R) -> Bool {
-    ends(with: RegexConsumer(regex))
+  func _ends<R: RegexComponent>(with regex: R) -> Bool {
+    _ends(with: RegexConsumer(regex))
   }
 }

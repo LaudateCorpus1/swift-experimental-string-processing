@@ -23,49 +23,24 @@
 // Utilities
 //===----------------------------------------------------------------------===//
 
-intptr_t _swift_stdlib_getMphIdx(uint32_t scalar, intptr_t levels,
-                                 const uint64_t * const *keys,
-                                 const uint16_t * const *ranks,
-                                 const uint16_t * const sizes);
+intptr_t _swift_string_processing_getMphIdx(uint32_t scalar, intptr_t levels,
+                                            const uint64_t * const *keys,
+                                            const uint16_t * const *ranks,
+                                            const uint16_t * const sizes);
 
-intptr_t _swift_stdlib_getScalarBitArrayIdx(uint32_t scalar,
-                                            const uint64_t *bitArrays,
-                                            const uint16_t *ranks);
-
-//===----------------------------------------------------------------------===//
-// Normalization
-//===----------------------------------------------------------------------===//
-
-SWIFT_CC
-uint16_t _swift_stdlib_getNormData(uint32_t scalar);
-
-SWIFT_CC
-const uint8_t *_swift_stdlib_nfd_decompositions(void);
-
-SWIFT_CC
-uint32_t _swift_stdlib_getDecompositionEntry(uint32_t scalar);
-
-SWIFT_CC
-uint32_t _swift_stdlib_getComposition(uint32_t x, uint32_t y);
-
-//===----------------------------------------------------------------------===//
-// Grapheme Breaking
-//===----------------------------------------------------------------------===//
-
-SWIFT_CC
-uint8_t _swift_stdlib_getGraphemeBreakProperty(uint32_t scalar);
-
-SWIFT_CC
-_Bool _swift_stdlib_isLinkingConsonant(uint32_t scalar);
+intptr_t _swift_string_processing_getScalarBitArrayIdx(uint32_t scalar,
+                                                       const uint64_t *bitArrays,
+                                                       const uint16_t *ranks);
 
 //===----------------------------------------------------------------------===//
 // Scalar Props
 //===----------------------------------------------------------------------===//
 
 SWIFT_CC
-uint8_t _swift_stdlib_getScript(uint32_t scalar);
+uint8_t _swift_string_processing_getScript(uint32_t scalar);
 
 SWIFT_CC
-const uint8_t * const _swift_stdlib_getScriptExtensions(uint32_t scalar, uint8_t *count);
+const uint8_t *_swift_string_processing_getScriptExtensions(uint32_t scalar,
+                                                            uint8_t *count);
 
 #endif // SWIFT_STDLIB_SHIMS_UNICODEDATA_H

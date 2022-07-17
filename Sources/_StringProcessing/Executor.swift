@@ -9,81 +9,89 @@
 //
 //===----------------------------------------------------------------------===//
 
-import _MatchingEngine
+@_implementationOnly import _RegexParser
 
-  // FIXME: Public for prototype
-public struct Executor {
+struct Executor {
   // TODO: consider let, for now lets us toggle tracing
-  var engine: Engine<String>
+  var engine: Engine
 
-  init(program: Program, enablesTracing: Bool = false) {
+  init(program: MEProgram, enablesTracing: Bool = false) {
     self.engine = Engine(program, enableTracing: enablesTracing)
   }
 
-  // FIXME: Public for prototype
-  public struct Result {
-    public var range: Range<String.Index>
-    var captures: [StructuredCapture]
-    var referencedCaptureOffsets: [ReferenceID: Int]
+  @available(SwiftStdlib 5.7, *)
+  func firstMatch<Output>(
+    _ input: String,
+    subjectBounds: Range<String.Index>,
+    searchBounds: Range<String.Index>,
+    graphemeSemantic: Bool
+  ) throws -> Regex<Output>.Match? {
+    var cpu = engine.makeFirstMatchProcessor(
+      input: input,
+      subjectBounds: subjectBounds,
+      searchBounds: searchBounds)
 
-    var destructure: (
-      matched: Range<String.Index>,
-      captures: [StructuredCapture],
-      referencedCaptureOffsets: [ReferenceID: Int]
-    ) {
-      (range, captures, referencedCaptureOffsets)
-    }
-
-    init(
-      _ matched: Range<String.Index>, _ captures: [StructuredCapture],
-      _ referencedCaptureOffsets: [ReferenceID: Int]
-    ) {
-      self.range = matched
-      self.captures = captures
-      self.referencedCaptureOffsets = referencedCaptureOffsets
+    var low = searchBounds.lowerBound
+    let high = searchBounds.upperBound
+    while true {
+      if let m: Regex<Output>.Match = try _match(
+        input, from: low, using: &cpu
+      ) {
+        return m
+      }
+      if low >= high { return nil }
+      if graphemeSemantic {
+        input.formIndex(after: &low)
+      } else {
+        input.unicodeScalars.formIndex(after: &low)
+      }
+      cpu.reset(currentPosition: low)
     }
   }
 
-  public func execute(
-    input: String,
-    in range: Range<String.Index>,
-    mode: MatchMode = .wholeString
-  ) -> Result? {
-    guard let (endIdx, capList) = engine.consume(
-      input, in: range, matchMode: mode
-    ) else {
+  @available(SwiftStdlib 5.7, *)
+  func match<Output>(
+    _ input: String,
+    in subjectBounds: Range<String.Index>,
+    _ mode: MatchMode
+  ) throws -> Regex<Output>.Match? {
+    var cpu = engine.makeProcessor(
+      input: input, bounds: subjectBounds, matchMode: mode)
+    return try _match(input, from: subjectBounds.lowerBound, using: &cpu)
+  }
+
+  @available(SwiftStdlib 5.7, *)
+  func _match<Output>(
+    _ input: String,
+    from currentPosition: String.Index,
+    using cpu: inout Processor
+  ) throws -> Regex<Output>.Match? {
+    // FIXME: currentPosition is already encapsulated in cpu, don't pass in
+    // FIXME: cpu.consume() should return the matched range, not the upper bound
+    guard let endIdx = cpu.consume() else {
+      if let e = cpu.failureReason {
+        throw e
+      }
       return nil
     }
-    let capStruct = engine.program.captureStructure
-    do {
-      let range = range.lowerBound..<endIdx
 
-      let caps = try capStruct.structuralize(
-        capList, input)
-      return Result(range, caps, capList.referencedCaptureOffsets)
-    } catch {
-      fatalError(String(describing: error))
-    }
-  }
-  public func execute(
-    input: Substring,
-    mode: MatchMode = .wholeString
-  ) -> Result? {
-    self.execute(
-      input: input.base,
-      in: input.startIndex..<input.endIndex,
-      mode: mode)
+    let capList = MECaptureList(
+      values: cpu.storedCaptures,
+      referencedCaptureOffsets: engine.program.referencedCaptureOffsets)
+
+    let range = currentPosition..<endIdx
+    let caps = engine.program.captureList.createElements(capList)
+
+    let anyRegexOutput = AnyRegexOutput(input: input, elements: caps)
+    return .init(anyRegexOutput: anyRegexOutput, range: range)
   }
 
-  public func executeFlat(
-    input: String,
-    in range: Range<String.Index>,
-    mode: MatchMode = .wholeString
-  ) -> (Range<String.Index>, CaptureList)? {
-    engine.consume(
-      input, in: range, matchMode: mode
-    ).map { endIndex, capture in
-      (range.lowerBound..<endIndex, capture)
-    }
+  @available(SwiftStdlib 5.7, *)
+  func dynamicMatch(
+    _ input: String,
+    in subjectBounds: Range<String.Index>,
+    _ mode: MatchMode
+  ) throws -> Regex<AnyRegexOutput>.Match? {
+    try match(input, in: subjectBounds, mode)
   }
 }

@@ -9,16 +9,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-import _MatchingEngine // For errors
+@_implementationOnly import _RegexParser // For errors
 
-extension MEProgram where Input.Element: Hashable {
-  public struct Builder {
+extension MEProgram {
+  struct Builder {
     var instructions: [Instruction] = []
 
     var elements = TypedSetVector<Input.Element, _ElementRegister>()
     var sequences = TypedSetVector<[Input.Element], _SequenceRegister>()
-    var strings = TypedSetVector<String, _StringRegister>()
 
+    var asciiBitsets: [DSLTree.CustomCharacterClass.AsciiBitset] = []
     var consumeFunctions: [ConsumeFunction] = []
     var assertionFunctions: [AssertionFunction] = []
     var transformFunctions: [TransformFunction] = []
@@ -29,28 +29,27 @@ extension MEProgram where Input.Element: Hashable {
     var addressFixups: [(InstructionAddress, AddressFixup)] = []
 
     // Registers
-    var nextBoolRegister = BoolRegister(0)
     var nextIntRegister = IntRegister(0)
-    var nextPositionRegister = PositionRegister(0)
     var nextCaptureRegister = CaptureRegister(0)
     var nextValueRegister = ValueRegister(0)
+    var nextPositionRegister = PositionRegister(0)
 
     // Special addresses or instructions
     var failAddressToken: AddressToken? = nil
 
-    // TODO: Should we have better API for building this up
-    // as we compile?
-    var captureStructure: CaptureStructure = .empty
+    var captureList = CaptureList()
+    var initialOptions = MatchingOptions()
 
     // Symbolic reference resolution
     var unresolvedReferences: [ReferenceID: [InstructionAddress]] = [:]
     var referencedCaptureOffsets: [ReferenceID: Int] = [:]
+
     var captureCount: Int {
       // We currently deduce the capture count from the capture register number.
       nextCaptureRegister.rawValue
     }
 
-    public init() {}
+    init() {}
   }
 }
 
@@ -71,7 +70,7 @@ extension MEProgram.Builder {
   // TODO: We want a better strategy for fixups, leaving
   // the operand in a different form isn't great...
 
-  public init<S: Sequence>(staticElements: S) where S.Element == Input.Element {
+  init<S: Sequence>(staticElements: S) where S.Element == Character {
     staticElements.forEach { elements.store($0) }
   }
 
@@ -79,21 +78,7 @@ extension MEProgram.Builder {
     .init(instructions.endIndex - 1)
   }
 
-  public mutating func buildNop(_ r: StringRegister? = nil) {
-    instructions.append(.init(.nop, .init(optionalString: r)))
-  }
-  public mutating func buildNop(_ s: String) {
-    buildNop(strings.store(s))
-  }
-
-  public mutating func buildDecrement(
-    _ i: IntRegister, nowZero: BoolRegister
-  ) {
-    instructions.append(.init(
-      .decrement, .init(bool: nowZero, int: i)))
-  }
-
-  public mutating func buildMoveImmediate(
+  mutating func buildMoveImmediate(
     _ value: UInt64, into: IntRegister
   ) {
     instructions.append(.init(
@@ -101,33 +86,19 @@ extension MEProgram.Builder {
   }
 
   // TODO: generic
-  public mutating func buildMoveImmediate(
+  mutating func buildMoveImmediate(
     _ value: Int, into: IntRegister
   ) {
     let uint = UInt64(asserting: value)
     buildMoveImmediate(uint, into: into)
   }
 
-  public mutating func buildMoveCurrentPosition(
-    into: PositionRegister
-  ) {
-    instructions.append(.init(
-      .movePosition, .init(position: into)))
-  }
-
-  public mutating func buildBranch(to t: AddressToken) {
+  mutating func buildBranch(to t: AddressToken) {
     instructions.append(.init(.branch))
     fixup(to: t)
   }
-  public mutating func buildCondBranch(
-    _ condition: BoolRegister, to t: AddressToken
-  ) {
-    instructions.append(
-      .init(.condBranch, .init(bool: condition)))
-    fixup(to: t)
-  }
 
-  public mutating func buildCondBranch(
+  mutating func buildCondBranch(
     to t: AddressToken, ifZeroElseDecrement i: IntRegister
   ) {
     instructions.append(
@@ -135,115 +106,105 @@ extension MEProgram.Builder {
     fixup(to: t)
   }
 
-  public mutating func buildSave(_ t: AddressToken) {
+  mutating func buildCondBranch(
+    to t: AddressToken,
+    ifSamePositionAs r: PositionRegister
+  ) {
+    instructions.append(.init(.condBranchSamePosition, .init(position: r)))
+    fixup(to: t)
+  }
+
+  mutating func buildSave(_ t: AddressToken) {
     instructions.append(.init(.save))
     fixup(to: t)
   }
-  public mutating func buildSaveAddress(_ t: AddressToken) {
+  mutating func buildSaveAddress(_ t: AddressToken) {
     instructions.append(.init(.saveAddress))
     fixup(to: t)
   }
-  public mutating func buildSplit(
+  mutating func buildSplit(
     to: AddressToken, saving: AddressToken
   ) {
     instructions.append(.init(.splitSaving))
     fixup(to: (to, saving))
   }
 
-  public mutating func buildClear() {
+  mutating func buildClear() {
     instructions.append(.init(.clear))
   }
-  public mutating func buildRestore() {
-    instructions.append(.init(.restore))
-  }
-  public mutating func buildFail() {
-    instructions.append(.init(.fail))
-  }
-  public mutating func buildCall(_ t: AddressToken) {
-    instructions.append(.init(.call))
+  mutating func buildClearThrough(_ t: AddressToken) {
+    instructions.append(.init(.clearThrough))
     fixup(to: t)
   }
-  public mutating func buildRet() {
-    instructions.append(.init(.ret))
+  mutating func buildFail() {
+    instructions.append(.init(.fail))
   }
 
-  public mutating func buildAbort(_ s: StringRegister? = nil) {
-    instructions.append(.init(
-      .abort, .init(optionalString: s)))
-  }
-  public mutating func buildAbort(_ s: String) {
-    buildAbort(strings.store(s))
-  }
-
-  public mutating func buildAdvance(_ n: Distance) {
+  mutating func buildAdvance(_ n: Distance) {
     instructions.append(.init(.advance, .init(distance: n)))
   }
 
-  public mutating func buildMatch(_ e: Input.Element) {
+  mutating func buildMatch(_ e: Character, isCaseInsensitive: Bool) {
     instructions.append(.init(
-      .match, .init(element: elements.store(e))))
+      .match, .init(element: elements.store(e), isCaseInsensitive: isCaseInsensitive)))
   }
 
-  public mutating func buildMatchSequence<S: Sequence>(
-    _ s: S
-  ) where S.Element == Input.Element {
-    instructions.append(.init(
-      .matchSequence,
-      .init(sequence: sequences.store(.init(s)))))
+  mutating func buildMatchScalar(_ s: Unicode.Scalar, boundaryCheck: Bool) {
+    instructions.append(.init(.matchScalar, .init(scalar: s, caseInsensitive: false, boundaryCheck: boundaryCheck)))
+  }
+  
+  mutating func buildMatchScalarCaseInsensitive(_ s: Unicode.Scalar, boundaryCheck: Bool) {
+    instructions.append(.init(.matchScalar, .init(scalar: s, caseInsensitive: true, boundaryCheck: boundaryCheck)))
   }
 
-  public mutating func buildMatchSlice(
-    lower: PositionRegister, upper: PositionRegister
+
+  mutating func buildMatchAsciiBitset(
+    _ b: DSLTree.CustomCharacterClass.AsciiBitset
   ) {
     instructions.append(.init(
-      .matchSlice,
-      .init(pos: lower, pos2: upper)))
+      .matchBitset, .init(bitset: makeAsciiBitset(b), isScalar: false)))
   }
 
-  public mutating func buildConsume(
+  mutating func buildScalarMatchAsciiBitset(
+    _ b: DSLTree.CustomCharacterClass.AsciiBitset
+  ) {
+    instructions.append(.init(
+      .matchBitset, .init(bitset: makeAsciiBitset(b), isScalar: true)))
+  }
+
+  mutating func buildConsume(
     by p: @escaping MEProgram.ConsumeFunction
   ) {
     instructions.append(.init(
       .consumeBy, .init(consumer: makeConsumeFunction(p))))
   }
 
-  public mutating func buildAssert(
+  mutating func buildAssert(
     by p: @escaping MEProgram.AssertionFunction
   ) {
     instructions.append(.init(
       .assertBy, .init(assertion: makeAssertionFunction(p))))
   }
 
-  public mutating func buildAssert(
-    _ e: Input.Element, into cond: BoolRegister
-  ) {
-    instructions.append(.init(.assertion, .init(
-      element: elements.store(e), bool: cond)))
-  }
-
-  public mutating func buildAccept() {
+  mutating func buildAccept() {
     instructions.append(.init(.accept))
   }
 
-  public mutating func buildPrint(_ s: StringRegister) {
-    instructions.append(.init(.print, .init(string: s)))
-  }
-
-  public mutating func buildBeginCapture(
+  mutating func buildBeginCapture(
     _ cap: CaptureRegister
   ) {
     instructions.append(
       .init(.beginCapture, .init(capture: cap)))
   }
 
-  public mutating func buildEndCapture(
+  mutating func buildEndCapture(
     _ cap: CaptureRegister
   ) {
     instructions.append(
       .init(.endCapture, .init(capture: cap)))
   }
 
-  public mutating func buildTransformCapture(
+  mutating func buildTransformCapture(
     _ cap: CaptureRegister, _ trans: TransformRegister
   ) {
     instructions.append(.init(
@@ -251,7 +212,7 @@ extension MEProgram.Builder {
       .init(capture: cap, transform: trans)))
   }
 
-  public mutating func buildMatcher(
+  mutating func buildMatcher(
     _ fun: MatcherRegister, into reg: ValueRegister
   ) {
     instructions.append(.init(
@@ -259,7 +220,7 @@ extension MEProgram.Builder {
       .init(matcher: fun, value: reg)))
   }
 
-  public mutating func buildMove(
+  mutating func buildMove(
     _ value: ValueRegister, into capture: CaptureRegister
   ) {
     instructions.append(.init(
@@ -267,21 +228,32 @@ extension MEProgram.Builder {
       .init(value: value, capture: capture)))
   }
 
-  public mutating func buildBackreference(
+  mutating func buildMoveCurrentPosition(into r: PositionRegister) {
+    instructions.append(.init(.moveCurrentPosition, .init(position: r)))
+  }
+
+  mutating func buildBackreference(
     _ cap: CaptureRegister
   ) {
     instructions.append(
       .init(.backreference, .init(capture: cap)))
   }
 
-  public mutating func buildUnresolvedReference(id: ReferenceID) {
+  mutating func buildUnresolvedReference(id: ReferenceID) {
     buildBackreference(.init(0))
     unresolvedReferences[id, default: []].append(lastInstructionAddress)
   }
 
+  mutating func buildNamedReference(_ name: String) throws {
+    guard let index = captureList.indexOfCapture(named: name) else {
+      throw RegexCompilationError.uncapturedReference
+    }
+    buildBackreference(.init(index))
+  }
+
   // TODO: Mutating because of fail address fixup, drop when
   // that's removed
-  public mutating func assemble() throws -> MEProgram {
+  mutating func assemble() throws -> MEProgram {
     try resolveReferences()
 
     // TODO: This will add a fail instruction at the end every
@@ -304,13 +276,11 @@ extension MEProgram.Builder {
       let payload: Instruction.Payload
 
       switch inst.opcode {
-      case .condBranch:
-        payload = .init(addr: addr, bool: inst.payload.bool)
-
       case .condBranchZeroElseDecrement:
         payload = .init(addr: addr, int: inst.payload.int)
-
-      case .branch, .save, .saveAddress, .call:
+      case .condBranchSamePosition:
+        payload = .init(addr: addr, position: inst.payload.position)
+      case .branch, .save, .saveAddress, .clearThrough:
         payload = .init(addr: addr)
 
       case .splitSaving:
@@ -331,11 +301,10 @@ extension MEProgram.Builder {
     var regInfo = MEProgram.RegisterInfo()
     regInfo.elements = elements.count
     regInfo.sequences = sequences.count
-    regInfo.strings = strings.count
-    regInfo.bools = nextBoolRegister.rawValue
     regInfo.ints = nextIntRegister.rawValue
-    regInfo.positions = nextPositionRegister.rawValue
     regInfo.values = nextValueRegister.rawValue
+    regInfo.positions = nextPositionRegister.rawValue
+    regInfo.bitsets = asciiBitsets.count
     regInfo.consumeFunctions = consumeFunctions.count
     regInfo.assertionFunctions = assertionFunctions.count
     regInfo.transformFunctions = transformFunctions.count
@@ -346,32 +315,33 @@ extension MEProgram.Builder {
       instructions: InstructionList(instructions),
       staticElements: elements.stored,
       staticSequences: sequences.stored,
-      staticStrings: strings.stored,
+      staticBitsets: asciiBitsets,
       staticConsumeFunctions: consumeFunctions,
       staticAssertionFunctions: assertionFunctions,
       staticTransformFunctions: transformFunctions,
       staticMatcherFunctions: matcherFunctions,
       registerInfo: regInfo,
-      captureStructure: captureStructure,
-      referencedCaptureOffsets: referencedCaptureOffsets)
+      captureList: captureList,
+      referencedCaptureOffsets: referencedCaptureOffsets,
+      initialOptions: initialOptions)
   }
 
-  public mutating func reset() { self = Self() }
+  mutating func reset() { self = Self() }
 }
 
 // Address-agnostic interfaces for label-like support
 extension MEProgram.Builder {
-  public enum _AddressToken {}
-  public typealias AddressToken = TypedInt<_AddressToken>
+  enum _AddressToken {}
+  typealias AddressToken = TypedInt<_AddressToken>
 
-  public mutating func makeAddress() -> AddressToken {
+  mutating func makeAddress() -> AddressToken {
     defer { addressTokens.append(nil) }
     return AddressToken(addressTokens.count)
   }
 
   // Resolves the address token to the most recently added
   // instruction, updating prior and future address references
-  public mutating func resolve(_ t: AddressToken) {
+  mutating func resolve(_ t: AddressToken) {
     assert(!instructions.isEmpty)
 
     addressTokens[t.rawValue] =
@@ -380,7 +350,7 @@ extension MEProgram.Builder {
 
   // Resolves the address token to the next instruction (one past the most
   // recently added one), updating prior and future address references.
-  public mutating func label(_ t: AddressToken) {
+  mutating func label(_ t: AddressToken) {
     addressTokens[t.rawValue] =
       InstructionAddress(instructions.count)
   }
@@ -388,7 +358,7 @@ extension MEProgram.Builder {
   // Associate the most recently added instruction with
   // the provided token, ensuring it is fixed up during
   // assembly
-  public mutating func fixup(to t: AddressToken) {
+  mutating func fixup(to t: AddressToken) {
     assert(!instructions.isEmpty)
     addressFixups.append(
       (InstructionAddress(instructions.endIndex-1), .init(t)))
@@ -397,7 +367,7 @@ extension MEProgram.Builder {
   // Associate the most recently added instruction with
   // the provided tokens, ensuring it is fixed up during
   // assembly
-  public mutating func fixup(
+  mutating func fixup(
     to ts: (AddressToken, AddressToken)
   ) {
     assert(!instructions.isEmpty)
@@ -412,7 +382,7 @@ extension MEProgram.Builder {
   //
   // This is useful for possessive quantification that needs some initial save
   // point to "ratchet" upon a successful match.
-  public mutating func pushEmptySavePoint() {
+  mutating func pushEmptySavePoint() {
     if failAddressToken == nil {
       failAddressToken = makeAddress()
     }
@@ -438,7 +408,9 @@ fileprivate extension MEProgram.Builder {
 
 // Register helpers
 extension MEProgram.Builder {
-  public mutating func makeCapture(id: ReferenceID?) -> CaptureRegister {
+  mutating func makeCapture(
+    id: ReferenceID?, name: String?
+  ) -> CaptureRegister {
     defer { nextCaptureRegister.rawValue += 1 }
     // Register the capture for later lookup via symbolic references.
     if let id = id {
@@ -446,28 +418,25 @@ extension MEProgram.Builder {
         captureCount, forKey: id)
       assert(preexistingValue == nil)
     }
+    if let name = name {
+      let index = captureList.indexOfCapture(named: name)
+      assert(index == nextCaptureRegister.rawValue)
+    }
+    assert(nextCaptureRegister.rawValue < captureList.captures.count)
     return nextCaptureRegister
   }
 
-  public mutating func makeBoolRegister() -> BoolRegister {
-    defer { nextBoolRegister.rawValue += 1 }
-    return nextBoolRegister
-  }
-  public mutating func makeIntRegister() -> IntRegister {
+  mutating func makeIntRegister() -> IntRegister {
     defer { nextIntRegister.rawValue += 1 }
     return nextIntRegister
   }
-  public mutating func makePositionRegister() -> PositionRegister {
-    defer { nextPositionRegister.rawValue += 1 }
-    return nextPositionRegister
-  }
-  public mutating func makeValueRegister() -> ValueRegister {
+  mutating func makeValueRegister() -> ValueRegister {
     defer { nextValueRegister.rawValue += 1 }
     return nextValueRegister
   }
 
   // Allocate and initialize a register
-  public mutating func makeIntRegister(
+  mutating func makeIntRegister(
     initialValue: Int
   ) -> IntRegister {
     let r = makeIntRegister()
@@ -475,54 +444,41 @@ extension MEProgram.Builder {
     return r
   }
 
-  // Allocate and initialize a register
-  public mutating func makePositionRegister(
-    initializingWithCurrentPosition: ()
-  ) -> PositionRegister {
-    let r = makePositionRegister()
-    self.buildMoveCurrentPosition(into: r)
+  mutating func makePositionRegister() -> PositionRegister {
+    let r = nextPositionRegister
+    defer { nextPositionRegister.rawValue += 1 }
     return r
-  }
-
-  // 'kill' or release allocated registers
-  public mutating func kill(_ r: IntRegister) {
-    // TODO: Release/reuse registers, for now nop makes
-    // reading the code easier
-    buildNop("kill \(r)")
-  }
-  public mutating func kill(_ r: BoolRegister) {
-    // TODO: Release/reuse registers, for now nop makes
-    // reading the code easier
-    buildNop("kill \(r)")
-  }
-  public mutating func kill(_ r: PositionRegister) {
-    // TODO: Release/reuse registers, for now nop makes
-    // reading the code easier
-    buildNop("kill \(r)")
   }
 
   // TODO: A register-mapping helper struct, which could release
   // registers without monotonicity required
 
-  public mutating func makeConsumeFunction(
+  mutating func makeAsciiBitset(
+    _ b: DSLTree.CustomCharacterClass.AsciiBitset
+  ) -> AsciiBitsetRegister {
+    defer { asciiBitsets.append(b) }
+    return AsciiBitsetRegister(asciiBitsets.count)
+  }
+  
+  mutating func makeConsumeFunction(
     _ f: @escaping MEProgram.ConsumeFunction
   ) -> ConsumeFunctionRegister {
     defer { consumeFunctions.append(f) }
     return ConsumeFunctionRegister(consumeFunctions.count)
   }
-  public mutating func makeAssertionFunction(
+  mutating func makeAssertionFunction(
     _ f: @escaping MEProgram.AssertionFunction
   ) -> AssertionFunctionRegister {
     defer { assertionFunctions.append(f) }
     return AssertionFunctionRegister(assertionFunctions.count)
   }
-  public mutating func makeTransformFunction(
+  mutating func makeTransformFunction(
     _ f: @escaping MEProgram.TransformFunction
   ) -> TransformRegister {
     defer { transformFunctions.append(f) }
     return TransformRegister(transformFunctions.count)
   }
-  public mutating func makeMatcherFunction(
+  mutating func makeMatcherFunction(
     _ f: @escaping MEProgram.MatcherFunction
   ) -> MatcherRegister {
     defer { matcherFunctions.append(f) }

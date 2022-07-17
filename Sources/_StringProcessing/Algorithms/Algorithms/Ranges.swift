@@ -11,7 +11,7 @@
 
 // MARK: `RangesCollection`
 
-public struct RangesCollection<Searcher: CollectionSearcher> {
+struct RangesCollection<Searcher: CollectionSearcher> {
   public typealias Base = Searcher.Searched
   
   let base: Base
@@ -33,7 +33,7 @@ public struct RangesCollection<Searcher: CollectionSearcher> {
   }
 }
 
-public struct RangesIterator<Searcher: CollectionSearcher>: IteratorProtocol {
+struct RangesIterator<Searcher: CollectionSearcher>: IteratorProtocol {
   public typealias Base = Searcher.Searched
   
   let base: Base
@@ -92,7 +92,7 @@ extension RangesCollection: Collection {
 }
 
 extension RangesCollection.Index: Comparable {
-  public static func == (lhs: Self, rhs: Self) -> Bool {
+  static func == (lhs: Self, rhs: Self) -> Bool {
     switch (lhs.range, rhs.range) {
     case (nil, nil):
       return true
@@ -103,7 +103,7 @@ extension RangesCollection.Index: Comparable {
     }
   }
 
-  public static func < (lhs: Self, rhs: Self) -> Bool {
+  static func < (lhs: Self, rhs: Self) -> Bool {
     switch (lhs.range, rhs.range) {
     case (nil, _):
       return false
@@ -117,8 +117,8 @@ extension RangesCollection.Index: Comparable {
 
 // MARK: `ReversedRangesCollection`
 
-public struct ReversedRangesCollection<Searcher: BackwardCollectionSearcher> {
-  public typealias Base = Searcher.BackwardSearched
+struct ReversedRangesCollection<Searcher: BackwardCollectionSearcher> {
+  typealias Base = Searcher.BackwardSearched
   
   let base: Base
   let searcher: Searcher
@@ -157,7 +157,7 @@ extension ReversedRangesCollection: Sequence {
 // MARK: `CollectionSearcher` algorithms
 
 extension Collection {
-  public func ranges<S: CollectionSearcher>(
+  func _ranges<S: CollectionSearcher>(
     of searcher: S
   ) -> RangesCollection<S> where S.Searched == Self {
     RangesCollection(base: self, searcher: searcher)
@@ -165,7 +165,7 @@ extension Collection {
 }
 
 extension BidirectionalCollection {
-  public func rangesFromBack<S: BackwardCollectionSearcher>(
+  func _rangesFromBack<S: BackwardCollectionSearcher>(
     of searcher: S
   ) -> ReversedRangesCollection<S> where S.BackwardSearched == Self {
     ReversedRangesCollection(base: self, searcher: searcher)
@@ -175,10 +175,23 @@ extension BidirectionalCollection {
 // MARK: Fixed pattern algorithms
 
 extension Collection where Element: Equatable {
-  public func ranges<S: Sequence>(
-    of other: S
-  ) -> RangesCollection<ZSearcher<Self>> where S.Element == Element {
-    ranges(of: ZSearcher(pattern: Array(other), by: ==))
+  func _ranges<C: Collection>(
+    of other: C
+  ) -> RangesCollection<ZSearcher<Self>> where C.Element == Element {
+    _ranges(of: ZSearcher(pattern: Array(other), by: ==))
+  }
+
+  // FIXME: Return `some Collection<Range<Index>>` for SE-0346
+  /// Finds and returns the ranges of the all occurrences of a given sequence
+  /// within the collection.
+  /// - Parameter other: The sequence to search for.
+  /// - Returns: A collection of ranges of all occurrences of `other`. Returns
+  ///  an empty collection if `other` is not found.
+  @available(SwiftStdlib 5.7, *)
+  public func ranges<C: Collection>(
+    of other: C
+  ) -> [Range<Index>] where C.Element == Element {
+    Array(_ranges(of: other))
   }
 }
 
@@ -194,12 +207,12 @@ extension BidirectionalCollection where Element: Equatable {
 }
 
 extension BidirectionalCollection where Element: Comparable {
-  public func ranges<S: Sequence>(
-    of other: S
+  func _ranges<C: Collection>(
+    of other: C
   ) -> RangesCollection<PatternOrEmpty<TwoWaySearcher<Self>>>
-    where S.Element == Element
+    where C.Element == Element
   {
-    ranges(of: PatternOrEmpty(searcher: TwoWaySearcher(pattern: Array(other))))
+    _ranges(of: PatternOrEmpty(searcher: TwoWaySearcher(pattern: Array(other))))
   }
   
   // FIXME
@@ -213,18 +226,98 @@ extension BidirectionalCollection where Element: Comparable {
 //  }
 }
 
-// MARK: Regex algorithms
+@available(SwiftStdlib 5.7, *)
+struct RegexRangesCollection<Output> {
+  let base: RegexMatchesCollection<Output>
 
-extension BidirectionalCollection where SubSequence == Substring {
-  public func ranges<R: RegexProtocol>(
-    of regex: R
-  ) -> RangesCollection<RegexConsumer<R, Self>> {
-    ranges(of: RegexConsumer(regex))
+  init(
+    input: String,
+    subjectBounds: Range<String.Index>,
+    searchBounds: Range<String.Index>,
+    regex: Regex<Output>
+  ) {
+    self.base = .init(
+      input: input,
+      subjectBounds: subjectBounds,
+      searchBounds: searchBounds,
+      regex: regex)
+  }
+}
+
+@available(SwiftStdlib 5.7, *)
+extension RegexRangesCollection: Sequence {
+  struct Iterator: IteratorProtocol {
+    var matchesBase: RegexMatchesCollection<Output>.Iterator
+    
+    mutating func next() -> Range<String.Index>? {
+      matchesBase.next().map(\.range)
+    }
   }
   
-  public func rangesFromBack<R: RegexProtocol>(
+  func makeIterator() -> Iterator {
+    Iterator(matchesBase: base.makeIterator())
+  }
+}
+
+@available(SwiftStdlib 5.7, *)
+extension RegexRangesCollection: Collection {
+  typealias Index = RegexMatchesCollection<Output>.Index
+
+  var startIndex: Index { base.startIndex }
+  var endIndex: Index { base.endIndex }
+  func index(after i: Index) -> Index { base.index(after: i) }
+  subscript(position: Index) -> Range<String.Index> { base[position].range }
+}
+
+// MARK: Regex algorithms
+
+extension Collection where SubSequence == Substring {
+  @available(SwiftStdlib 5.7, *)
+  @_disfavoredOverload
+  func _ranges<R: RegexComponent>(
+    of regex: R,
+    subjectBounds: Range<String.Index>,
+    searchBounds: Range<String.Index>
+  ) -> RegexRangesCollection<R.RegexOutput> {
+    RegexRangesCollection(
+      input: self[...].base,
+      subjectBounds: subjectBounds,
+      searchBounds: searchBounds,
+      regex: regex.regex)
+  }
+  
+  @available(SwiftStdlib 5.7, *)
+  @_disfavoredOverload
+  func _ranges<R: RegexComponent>(
+    of regex: R
+  ) -> RegexRangesCollection<R.RegexOutput> {
+    _ranges(
+      of: regex,
+      subjectBounds: startIndex..<endIndex,
+      searchBounds: startIndex..<endIndex)
+  }
+}
+
+extension BidirectionalCollection where SubSequence == Substring {
+  @available(SwiftStdlib 5.7, *)
+  func _rangesFromBack<R: RegexComponent>(
     of regex: R
   ) -> ReversedRangesCollection<RegexConsumer<R, Self>> {
-    rangesFromBack(of: RegexConsumer(regex))
+    _rangesFromBack(of: RegexConsumer(regex))
+  }
+
+  // FIXME: Return `some Collection<Range<Index>>` for SE-0346
+  /// Finds and returns the ranges of the all occurrences of a given sequence
+  /// within the collection.
+  /// 
+  /// - Parameter regex: The regex to search for.
+  /// - Returns: A collection or ranges in the receiver of all occurrences of
+  /// `regex`. Returns an empty collection if `regex` is not found.
+  @_disfavoredOverload
+  @available(SwiftStdlib 5.7, *)
+  public func ranges(
+    of regex: some RegexComponent
+  ) -> [Range<Index>] {
+    Array(_ranges(of: regex))
   }
 }

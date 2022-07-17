@@ -1,46 +1,129 @@
-import _MatchingEngine
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the Swift.org open source project
+//
+// Copyright (c) 2021-2022 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See https://swift.org/LICENSE.txt for license information
+//
+//===----------------------------------------------------------------------===//
+
+@_spi(_Unicode)
+import Swift
+
+@_implementationOnly import _RegexParser
 
 extension Compiler {
   struct ByteCodeGen {
     var options: MatchingOptions
-    var builder = Program.Builder()
+    var builder = MEProgram.Builder()
+    /// A Boolean indicating whether the first matchable atom has been emitted.
+    /// This is used to determine whether to apply initial options.
+    var hasEmittedFirstMatchableAtom = false
 
-    mutating func finish(
-    ) throws -> Program {
-      builder.buildAccept()
-      return try builder.assemble()
+    private let compileOptions: CompileOptions
+    fileprivate var optimizationsEnabled: Bool { !compileOptions.contains(.disableOptimizations) }
+
+    init(
+      options: MatchingOptions,
+      compileOptions: CompileOptions,
+      captureList: CaptureList
+    ) {
+      self.options = options
+      self.compileOptions = compileOptions
+      self.builder.captureList = captureList
     }
   }
 }
 
 extension Compiler.ByteCodeGen {
+  mutating func emitRoot(_ root: DSLTree.Node) throws -> MEProgram {
+    // The whole match (`.0` element of output) is equivalent to an implicit
+    // capture over the entire regex.
+    try emitNode(.capture(name: nil, reference: nil, root))
+    builder.buildAccept()
+    return try builder.assemble()
+  }
+}
+
+fileprivate extension Compiler.ByteCodeGen {
   mutating func emitAtom(_ a: DSLTree.Atom) throws {
+    defer {
+      if a.isMatchable {
+        hasEmittedFirstMatchableAtom = true
+      }
+    }
     switch a {
     case .any:
       emitAny()
 
+    case .anyNonNewline:
+      emitAnyNonNewline()
+
+    case .dot:
+      emitDot()
+
     case let .char(c):
-      try emitCharacter(c)
-      
+      emitCharacter(c)
+
     case let .scalar(s):
-      try emitScalar(s)
-      
+      if options.semanticLevel == .graphemeCluster {
+        emitCharacter(Character(s))
+      } else {
+        emitMatchScalar(s)
+      }
+
     case let .assertion(kind):
       try emitAssertion(kind)
 
     case let .backreference(ref):
-      try emitBackreference(ref)
+      try emitBackreference(ref.ast)
 
     case let .symbolicReference(id):
       builder.buildUnresolvedReference(id: id)
 
+    case let .changeMatchingOptions(optionSequence):
+      if !hasEmittedFirstMatchableAtom {
+        builder.initialOptions.apply(optionSequence.ast)
+      }
+      options.apply(optionSequence.ast)
+
     case let .unconverted(astAtom):
-      if let consumer = try astAtom.generateConsumer(options) {
+      if let consumer = try astAtom.ast.generateConsumer(options) {
         builder.buildConsume(by: consumer)
       } else {
-        throw Unsupported("\(astAtom._patternBase)")
+        throw Unsupported("\(astAtom.ast._patternBase)")
       }
     }
+  }
+
+  mutating func emitQuotedLiteral(_ s: String) {
+    guard options.semanticLevel == .graphemeCluster else {
+      for char in s {
+        for scalar in char.unicodeScalars {
+          emitMatchScalar(scalar)
+        }
+      }
+      return
+    }
+
+    // Fast path for eliding boundary checks for an all ascii quoted literal
+    if optimizationsEnabled && s.allSatisfy(\.isASCII) {
+      let lastIdx = s.unicodeScalars.indices.last!
+      for idx in s.unicodeScalars.indices {
+        let boundaryCheck = idx == lastIdx
+        let scalar = s.unicodeScalars[idx]
+        if options.isCaseInsensitive && scalar.properties.isCased {
+          builder.buildMatchScalarCaseInsensitive(scalar, boundaryCheck: boundaryCheck)
+        } else {
+          builder.buildMatchScalar(scalar, boundaryCheck: boundaryCheck)
+        }
+      }
+      return
+    }
+
+    for c in s { emitCharacter(c) }
   }
 
   mutating func emitBackreference(
@@ -53,16 +136,46 @@ extension Compiler.ByteCodeGen {
     }
 
     switch ref.kind {
-    case .absolute(let i):
-      // Backreferences number starting at 1
-      builder.buildBackreference(.init(i-1))
-    case .relative, .named:
+    case .absolute(let n):
+      guard let i = n.value else {
+        throw Unreachable("Expected a value")
+      }
+      builder.buildBackreference(.init(i))
+    case .named(let name):
+      try builder.buildNamedReference(name)
+    case .relative:
       throw Unsupported("Backreference kind: \(ref)")
     }
   }
 
+  mutating func emitStartOfLine() {
+    builder.buildAssert { [semanticLevel = options.semanticLevel]
+        (_, _, input, pos, subjectBounds) in
+      if pos == subjectBounds.lowerBound { return true }
+      switch semanticLevel {
+      case .graphemeCluster:
+        return input[input.index(before: pos)].isNewline
+      case .unicodeScalar:
+        return input.unicodeScalars[input.unicodeScalars.index(before: pos)].isNewline
+      }
+    }
+  }
+
+  mutating func emitEndOfLine() {
+    builder.buildAssert { [semanticLevel = options.semanticLevel]
+      (_, _, input, pos, subjectBounds) in
+      if pos == subjectBounds.upperBound { return true }
+      switch semanticLevel {
+      case .graphemeCluster:
+        return input[pos].isNewline
+      case .unicodeScalar:
+        return input.unicodeScalars[pos].isNewline
+      }
+    }
+  }
+
   mutating func emitAssertion(
-    _ kind: AST.Atom.AssertionKind
+    _ kind: DSLTree.Atom.Assertion
   ) throws {
     // FIXME: Depends on API model we have... We may want to
     // think through some of these with API interactions in mind
@@ -72,20 +185,27 @@ extension Compiler.ByteCodeGen {
     // need to supply both a slice bounds and a per-search bounds.
     switch kind {
     case .startOfSubject:
-      builder.buildAssert { (input, pos, bounds) in
-        pos == input.startIndex
+      builder.buildAssert { (_, _, input, pos, subjectBounds) in
+        pos == subjectBounds.lowerBound
       }
 
     case .endOfSubjectBeforeNewline:
-      builder.buildAssert { (input, pos, bounds) in
-        if pos == input.endIndex { return true }
-        return input.index(after: pos) == input.endIndex
-         && input[pos].isNewline
+      builder.buildAssert { [semanticLevel = options.semanticLevel]
+          (_, _, input, pos, subjectBounds) in
+        if pos == subjectBounds.upperBound { return true }
+        switch semanticLevel {
+        case .graphemeCluster:
+          return input.index(after: pos) == subjectBounds.upperBound
+           && input[pos].isNewline
+        case .unicodeScalar:
+          return input.unicodeScalars.index(after: pos) == subjectBounds.upperBound
+           && input.unicodeScalars[pos].isNewline
+        }
       }
 
     case .endOfSubject:
-      builder.buildAssert { (input, pos, bounds) in
-        pos == input.endIndex
+      builder.buildAssert { (_, _, input, pos, subjectBounds) in
+        pos == subjectBounds.upperBound
       }
 
     case .resetStartOfMatch:
@@ -94,99 +214,158 @@ extension Compiler.ByteCodeGen {
 
     case .firstMatchingPositionInSubject:
       // TODO: We can probably build a nice model with API here
-      builder.buildAssert { (input, pos, bounds) in
-        pos == bounds.lowerBound
-      }
+      
+      // FIXME: This needs to be based on `searchBounds`,
+      // not the `subjectBounds` given as an argument here
+      builder.buildAssert { (_, _, input, pos, subjectBounds) in false }
 
     case .textSegment:
-      // This we should be able to do!
-      throw Unsupported(#"\y (text segment)"#)
-
-    case .notTextSegment:
-      // This we should be able to do!
-      throw Unsupported(#"\Y (not text segment)"#)
-
-    case .startOfLine:
-      builder.buildAssert { (input, pos, bounds) in
-        pos == input.startIndex ||
-        input[input.index(before: pos)].isNewline
+      builder.buildAssert { (_, _, input, pos, _) in
+        // FIXME: Grapheme or word based on options
+        input.isOnGraphemeClusterBoundary(pos)
       }
 
+    case .notTextSegment:
+      builder.buildAssert { (_, _, input, pos, _) in
+        // FIXME: Grapheme or word based on options
+        !input.isOnGraphemeClusterBoundary(pos)
+      }
+
+    case .startOfLine:
+      emitStartOfLine()
+
     case .endOfLine:
-      builder.buildAssert { (input, pos, bounds) in
-        pos == input.endIndex || input[pos].isNewline
+      emitEndOfLine()
+
+    case .caretAnchor:
+      if options.anchorsMatchNewlines {
+        emitStartOfLine()
+      } else {
+        builder.buildAssert { (_, _, input, pos, subjectBounds) in
+          pos == subjectBounds.lowerBound
+        }
+      }
+
+    case .dollarAnchor:
+      if options.anchorsMatchNewlines {
+        emitEndOfLine()
+      } else {
+        builder.buildAssert { (_, _, input, pos, subjectBounds) in
+          pos == subjectBounds.upperBound
+        }
       }
 
     case .wordBoundary:
-      // TODO: May want to consider Unicode level
-      builder.buildAssert { (input, pos, bounds) in
-        // TODO: How should we handle bounds?
-        CharacterClass.word.isBoundary(
-          input, at: pos, bounds: bounds)
+      builder.buildAssert { [options]
+          (cache, maxIndex, input, pos, subjectBounds) in
+        if options.usesSimpleUnicodeBoundaries {
+          // TODO: How should we handle bounds?
+          return _CharacterClassModel.word.isBoundary(
+            input,
+            at: pos,
+            bounds: subjectBounds,
+            with: options
+          )
+        } else {
+          return input.isOnWordBoundary(at: pos, using: &cache, &maxIndex)
+        }
       }
 
     case .notWordBoundary:
-      // TODO: May want to consider Unicode level
-      builder.buildAssert { (input, pos, bounds) in
-        // TODO: How should we handle bounds?
-        !CharacterClass.word.isBoundary(
-          input, at: pos, bounds: bounds)
+      builder.buildAssert { [options]
+          (cache, maxIndex, input, pos, subjectBounds) in
+        if options.usesSimpleUnicodeBoundaries {
+          // TODO: How should we handle bounds?
+          return !_CharacterClassModel.word.isBoundary(
+            input,
+            at: pos,
+            bounds: subjectBounds,
+            with: options
+          )
+        } else {
+          return !input.isOnWordBoundary(at: pos, using: &cache, &maxIndex)
+        }
       }
     }
   }
   
-  mutating func emitScalar(_ s: UnicodeScalar) throws {
-    // TODO: Native instruction buildMatchScalar(s)
-    if options.isCaseInsensitive {
-      // TODO: e.g. buildCaseInsensitiveMatchScalar(s)
-      builder.buildConsume(by: consumeScalar {
-        $0.properties.lowercaseMapping == s.properties.lowercaseMapping
-      })
+  mutating func emitMatchScalar(_ s: UnicodeScalar) {
+    assert(options.semanticLevel == .unicodeScalar)
+    if options.isCaseInsensitive && s.properties.isCased {
+      builder.buildMatchScalarCaseInsensitive(s, boundaryCheck: false)
     } else {
-      builder.buildConsume(by: consumeScalar {
-        $0 == s
-      })
+      builder.buildMatchScalar(s, boundaryCheck: false)
     }
   }
   
-  mutating func emitCharacter(_ c: Character) throws {
-    // FIXME: Does semantic level matter?
+  mutating func emitCharacter(_ c: Character) {
+    // Unicode scalar mode matches the specific scalars that comprise a character
+    if options.semanticLevel == .unicodeScalar {
+      for scalar in c.unicodeScalars {
+        emitMatchScalar(scalar)
+      }
+      return
+    }
+    
     if options.isCaseInsensitive && c.isCased {
-      // TODO: buildCaseInsensitiveMatch(c) or buildMatch(c, caseInsensitive: true)
-      builder.buildConsume { input, bounds in
-        let inputChar = input[bounds.lowerBound].lowercased()
-        let matchChar = c.lowercased()
-        return inputChar == matchChar
-          ? input.index(after: bounds.lowerBound)
-          : nil
+      if optimizationsEnabled && c.isASCII {
+        // c.isCased ensures that c is not CR-LF,
+        // so we know that c is a single scalar
+        assert(c.unicodeScalars.count == 1)
+        builder.buildMatchScalarCaseInsensitive(
+          c.unicodeScalars.last!,
+          boundaryCheck: true)
+      } else {
+        builder.buildMatch(c, isCaseInsensitive: true)
       }
-    } else {
-      builder.buildMatch(c)
+      return
     }
+    
+    if optimizationsEnabled && c.isASCII {
+      let lastIdx = c.unicodeScalars.indices.last!
+      for idx in c.unicodeScalars.indices {
+        builder.buildMatchScalar(c.unicodeScalars[idx], boundaryCheck: idx == lastIdx)
+      }
+      return
+    }
+      
+    builder.buildMatch(c, isCaseInsensitive: false)
   }
 
   mutating func emitAny() {
-    switch (options.semanticLevel, options.dotMatchesNewline) {
-    case (.graphemeCluster, true):
+    switch options.semanticLevel {
+    case .graphemeCluster:
       builder.buildAdvance(1)
-    case (.graphemeCluster, false):
+    case .unicodeScalar:
+      // TODO: builder.buildAdvanceUnicodeScalar(1)
+      builder.buildConsume { input, bounds in
+        input.unicodeScalars.index(after: bounds.lowerBound)
+      }
+    }
+  }
+
+  mutating func emitAnyNonNewline() {
+    switch options.semanticLevel {
+    case .graphemeCluster:
       builder.buildConsume { input, bounds in
         input[bounds.lowerBound].isNewline
         ? nil
         : input.index(after: bounds.lowerBound)
       }
-
-    case (.unicodeScalar, true):
-      // TODO: builder.buildAdvanceUnicodeScalar(1)
-      builder.buildConsume { input, bounds in
-        input.unicodeScalars.index(after: bounds.lowerBound)
-      }
-    case (.unicodeScalar, false):
+    case .unicodeScalar:
       builder.buildConsume { input, bounds in
         input[bounds.lowerBound].isNewline
         ? nil
         : input.unicodeScalars.index(after: bounds.lowerBound)
       }
+    }
+  }
+
+  mutating func emitDot() {
+    if options.dotMatchesNewline {
+      emitAny()
+    } else {
+      emitAnyNonNewline()
     }
   }
 
@@ -242,7 +421,7 @@ extension Compiler.ByteCodeGen {
       save(restoringAt: success)
       save(restoringAt: intercept)
       <sub-pattern>    // failure restores at intercept
-      clearSavePoint   // remove intercept
+      clearThrough(intercept) // remove intercept and any leftovers from <sub-pattern>
       <if negative>:
         clearSavePoint // remove success
       fail             // positive->success, negative propagates
@@ -260,7 +439,7 @@ extension Compiler.ByteCodeGen {
     builder.buildSave(success)
     builder.buildSave(intercept)
     try emitNode(child)
-    builder.buildClear()
+    builder.buildClearThrough(intercept)
     if !positive {
       builder.buildClear()
     }
@@ -275,51 +454,67 @@ extension Compiler.ByteCodeGen {
     builder.label(success)
   }
 
+  mutating func emitAtomicNoncapturingGroup(
+    _ child: DSLTree.Node
+  ) throws {
+    /*
+      save(continuingAt: success)
+      save(restoringAt: intercept)
+      <sub-pattern>    // failure restores at intercept
+      clearThrough(intercept) // remove intercept and any leftovers from <sub-pattern>
+      fail             // ->success
+    intercept:
+      clearSavePoint   // remove success
+      fail             // propagate failure
+    success:
+      ...
+    */
+
+    let intercept = builder.makeAddress()
+    let success = builder.makeAddress()
+
+    builder.buildSaveAddress(success)
+    builder.buildSave(intercept)
+    try emitNode(child)
+    builder.buildClearThrough(intercept)
+    builder.buildFail()
+
+    builder.label(intercept)
+    builder.buildClear()
+    builder.buildFail()
+
+    builder.label(success)
+  }
+
   mutating func emitMatcher(
-    _ matcher: @escaping _MatcherInterface,
-    into capture: CaptureRegister? = nil
-  ) {
+    _ matcher: @escaping _MatcherInterface
+  ) -> ValueRegister {
 
     // TODO: Consider emitting consumer interface if
     // not captured. This may mean we should store
     // an existential instead of a closure...
 
-    let matcher = builder.makeMatcherFunction(matcher)
+    let matcher = builder.makeMatcherFunction { input, start, range in
+      try matcher(input, start, range)
+    }
 
     let valReg = builder.makeValueRegister()
     builder.buildMatcher(matcher, into: valReg)
-
-    // TODO: Instruction to store directly
-    if let cap = capture {
-      builder.buildMove(valReg, into: cap)
-    }
+    return valReg
   }
 
-  mutating func emitGroup(
+  mutating func emitNoncapturingGroup(
     _ kind: AST.Group.Kind,
-    _ child: DSLTree.Node,
-    _ referenceID: ReferenceID?
-  ) throws -> CaptureRegister? {
-    guard kind.isCapturing || referenceID == nil else {
-      throw Unreachable("Reference ID shouldn't exist for non-capturing groups")
-    }
+    _ child: DSLTree.Node
+  ) throws {
+    assert(!kind.isCapturing)
 
     options.beginScope()
     defer { options.endScope() }
 
-    // If we have a strong type, write result directly into
-    // the capture register.
-    //
-    // FIXME: Unify with .groupTransform
-    if kind.isCapturing, case let .matcher(_, m) = child {
-      let cap = builder.makeCapture(id: referenceID)
-      emitMatcher(m, into: cap)
-      return cap
-    }
-
     if let lookaround = kind.lookaroundKind {
       try emitLookaround(lookaround, child)
-      return nil
+      return
     }
 
     switch kind {
@@ -327,33 +522,44 @@ extension Compiler.ByteCodeGen {
         .lookbehind, .negativeLookbehind:
       throw Unreachable("TODO: reason")
 
-    case .capture, .namedCapture:
-      let cap = builder.makeCapture(id: referenceID)
-      builder.buildBeginCapture(cap)
-      try emitNode(child)
-      builder.buildEndCapture(cap)
-      return cap
+    case .capture, .namedCapture, .balancedCapture:
+      throw Unreachable("These should produce a capture node")
 
-    case .changeMatchingOptions(let optionSequence, _):
+    case .changeMatchingOptions(let optionSequence):
+      if !hasEmittedFirstMatchableAtom {
+        builder.initialOptions.apply(optionSequence)
+      }
       options.apply(optionSequence)
       try emitNode(child)
-      return nil
+      
+    case .atomicNonCapturing:
+      try emitAtomicNoncapturingGroup(child)
 
     default:
       // FIXME: Other kinds...
       try emitNode(child)
-      return nil
     }
   }
 
   mutating func emitQuantification(
     _ amount: AST.Quantification.Amount,
-    _ kind: AST.Quantification.Kind,
+    _ kind: DSLTree.QuantificationKind,
     _ child: DSLTree.Node
   ) throws {
-    let kind = kind.applying(options)
+    let updatedKind: AST.Quantification.Kind
+    switch kind {
+    case .explicit(let kind):
+      updatedKind = kind.ast
+    case .syntax(let kind):
+      updatedKind = kind.ast.applying(options)
+    case .default:
+      updatedKind = options.defaultQuantificationKind
+    }
 
     let (low, high) = amount.bounds
+    guard let low = low else {
+      throw Unreachable("Must have a lower bound")
+    }
     switch (low, high) {
     case (_, 0):
       // TODO: Should error out earlier, maybe DSL and parser
@@ -399,7 +605,12 @@ extension Compiler.ByteCodeGen {
           decrement %minTrips and fallthrough
 
       loop-body:
+        <if can't guarantee forward progress && extraTrips = nil>:
+          mov currentPosition %pos
         evaluate the subexpression
+        <if can't guarantee forward progress && extraTrips = nil>:
+          if %pos is currentPosition:
+            goto exit
         goto min-trip-count control block
 
       exit-policy control block:
@@ -480,7 +691,7 @@ extension Compiler.ByteCodeGen {
     }
 
     // Set up a dummy save point for possessive to update
-    if kind == .possessive {
+    if updatedKind == .possessive {
       builder.pushEmptySavePoint()
     }
 
@@ -502,7 +713,28 @@ extension Compiler.ByteCodeGen {
     //   <subexpression>
     //   branch min-trip-count
     builder.label(loopBody)
+
+    // if we aren't sure if the child node will have forward progress and
+    // we have an unbounded quantification
+    let startPosition: PositionRegister?
+    let emitPositionChecking =
+      (!optimizationsEnabled || !child.guaranteesForwardProgress) &&
+      extraTrips == nil
+
+    if emitPositionChecking {
+      startPosition = builder.makePositionRegister()
+      builder.buildMoveCurrentPosition(into: startPosition!)
+    } else {
+      startPosition = nil
+    }
     try emitNode(child)
+    if emitPositionChecking {
+      // in all quantifier cases, no matter what minTrips or extraTrips is,
+      // if we have a successful non-advancing match, branch to exit because it
+      // can match an arbitrary number of times
+      builder.buildCondBranch(to: exit, ifSamePositionAs: startPosition!)
+    }
+
     if minTrips <= 1 {
       // fallthrough
     } else {
@@ -526,7 +758,7 @@ extension Compiler.ByteCodeGen {
         to: exit, ifZeroElseDecrement: extraTripsReg!)
     }
 
-    switch kind {
+    switch updatedKind {
     case .eager:
       builder.buildSplit(to: loopBody, saving: exit)
     case .possessive:
@@ -546,14 +778,24 @@ extension Compiler.ByteCodeGen {
   mutating func emitCustomCharacterClass(
     _ ccc: DSLTree.CustomCharacterClass
   ) throws {
-    let consumer = try ccc.generateConsumer(options)
-    builder.buildConsume(by: consumer)
+    if let asciiBitset = ccc.asAsciiBitset(options),
+        optimizationsEnabled {
+      if options.semanticLevel == .unicodeScalar {
+        builder.buildScalarMatchAsciiBitset(asciiBitset)
+      } else {
+        builder.buildMatchAsciiBitset(asciiBitset)
+      }
+    } else {
+      let consumer = try ccc.generateConsumer(options)
+      builder.buildConsume(by: consumer)
+    }
   }
 
-  mutating func emitNode(_ node: DSLTree.Node) throws {
+  @discardableResult
+  mutating func emitNode(_ node: DSLTree.Node) throws -> ValueRegister? {
     switch node {
       
-    case let .alternation(children):
+    case let .orderedChoice(children):
       try emitAlternation(children)
 
     case let .concatenation(children):
@@ -561,61 +803,68 @@ extension Compiler.ByteCodeGen {
         try emitConcatenationComponent(child)
       }
 
-    case let .group(kind, child, referenceID):
-      _ = try emitGroup(kind, child, referenceID)
+    case let .capture(name, refId, child, transform):
+      options.beginScope()
+      defer { options.endScope() }
+
+      let cap = builder.makeCapture(id: refId, name: name)
+      builder.buildBeginCapture(cap)
+      let value = try emitNode(child)
+      builder.buildEndCapture(cap)
+      // If the child node produced a custom capture value, e.g. the result of
+      // a matcher, this should override the captured substring.
+      if let value {
+        builder.buildMove(value, into: cap)
+      }
+      // If there's a capture transform, apply it now.
+      if let transform = transform {
+        let fn = builder.makeTransformFunction { input, cap in
+          // If it's a substring capture with no custom value, apply the
+          // transform directly to the substring to avoid existential traffic.
+          //
+          // FIXME: separate out this code path. This is fragile,
+          // slow, and these are clearly different constructs
+          if let range = cap.range, cap.value == nil {
+            return try transform(input[range])
+          }
+
+          let value = constructExistentialOutputComponent(
+             from: input,
+             component: cap.deconstructed,
+             optionalCount: 0)
+          return try transform(value)
+        }
+        builder.buildTransformCapture(cap, fn)
+      }
+
+    case let .nonCapturingGroup(kind, child):
+      try emitNoncapturingGroup(kind.ast, child)
 
     case .conditional:
       throw Unsupported("Conditionals")
 
     case let .quantification(amt, kind, child):
-      try emitQuantification(amt, kind, child)
+      try emitQuantification(amt.ast, kind, child)
 
     case let .customCharacterClass(ccc):
-      try emitCustomCharacterClass(ccc)
+      if ccc.containsDot {
+        if !ccc.isInverted {
+          emitDot()
+        } else {
+          throw Unsupported("Inverted any")
+        }
+      } else {
+        try emitCustomCharacterClass(ccc)
+      }
 
     case let .atom(a):
       try emitAtom(a)
 
     case let .quotedLiteral(s):
-      // TODO: Should this incorporate options?
-      if options.isCaseInsensitive {
-        // TODO: buildCaseInsensitiveMatchSequence(c) or alternative
-        builder.buildConsume { input, bounds in
-          var iterator = s.makeIterator()
-          var currentIndex = bounds.lowerBound
-          while let ch = iterator.next() {
-            guard currentIndex < bounds.upperBound,
-                  ch.lowercased() == input[currentIndex].lowercased()
-            else { return nil }
-            input.formIndex(after: &currentIndex)
-          }
-          return currentIndex
-        }
-      } else {
-        builder.buildMatchSequence(s)
-      }
-
-    case let .regexLiteral(l):
-      try emitNode(l.dslTreeNode)
+      emitQuotedLiteral(s)
 
     case let .convertedRegexLiteral(n, _):
-      try emitNode(n)
-
-    case let .groupTransform(kind, child, t, referenceID):
-      guard let cap = try emitGroup(kind, child, referenceID) else {
-        assertionFailure("""
-          What does it mean to not have a capture to transform?
-          """)
-        return
-      }
-
-      // FIXME: Is this how we want to do it?
-      let transform = builder.makeTransformFunction {
-        input, range in
-        t(input[range])
-      }
-
-      builder.buildTransformCapture(cap, transform)
+      return try emitNode(n)
 
     case .absentFunction:
       throw Unsupported("absent function")
@@ -623,14 +872,53 @@ extension Compiler.ByteCodeGen {
       throw Unsupported("consumer")
 
     case let .matcher(_, f):
-      emitMatcher(f)
+      return emitMatcher(f)
 
     case .characterPredicate:
       throw Unsupported("character predicates")
 
     case .trivia, .empty:
-      return
+      return nil
     }
+    return nil
   }
 }
 
+extension DSLTree.Node {
+  var guaranteesForwardProgress: Bool {
+    switch self {
+    case .orderedChoice(let children):
+      return children.allSatisfy { $0.guaranteesForwardProgress }
+    case .concatenation(let children):
+      return children.contains(where: { $0.guaranteesForwardProgress })
+    case .capture(_, _, let node, _):
+      return node.guaranteesForwardProgress
+    case .nonCapturingGroup(let kind, let child):
+      switch kind.ast {
+      case .lookahead, .negativeLookahead, .lookbehind, .negativeLookbehind:
+        return false
+      default: return child.guaranteesForwardProgress
+      }
+    case .atom(let atom):
+      switch atom {
+      case .changeMatchingOptions, .assertion: return false
+      default: return true
+      }
+    case .trivia, .empty:
+      return false
+    case .quotedLiteral(let string):
+      return !string.isEmpty
+    case .convertedRegexLiteral(let node, _):
+      return node.guaranteesForwardProgress
+    case .consumer, .matcher:
+      // Allow zero width consumers and matchers
+     return false
+    case .customCharacterClass:
+      return true
+    case .quantification(let amount, _, let child):
+      let (atLeast, _) = amount.ast.bounds
+      return atLeast ?? 0 > 0 && child.guaranteesForwardProgress
+    default: return false
+    }
+  }
+}

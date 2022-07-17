@@ -12,7 +12,7 @@
 // MARK: `CollectionSearcher` algorithms
 
 extension Collection {
-  public func firstRange<S: CollectionSearcher>(
+  func _firstRange<S: CollectionSearcher>(
     of searcher: S
   ) -> Range<Index>? where S.Searched == Self {
     var state = searcher.state(for: self, in: startIndex..<endIndex)
@@ -21,7 +21,7 @@ extension Collection {
 }
 
 extension BidirectionalCollection {
-  public func lastRange<S: BackwardCollectionSearcher>(
+  func _lastRange<S: BackwardCollectionSearcher>(
     of searcher: S
   ) -> Range<Index>? where S.BackwardSearched == Self {
     var state = searcher.backwardState(for: self, in: startIndex..<endIndex)
@@ -32,19 +32,33 @@ extension BidirectionalCollection {
 // MARK: Fixed pattern algorithms
 
 extension Collection where Element: Equatable {
-  public func firstRange<S: Sequence>(
-    of sequence: S
-  ) -> Range<Index>? where S.Element == Element {
+  /// Finds and returns the range of the first occurrence of a given collection
+  /// within this collection.
+  ///
+  /// - Parameter other: The collection to search for.
+  /// - Returns: A range in the collection of the first occurrence of `sequence`.
+  /// Returns nil if `sequence` is not found.
+  @available(SwiftStdlib 5.7, *)
+  public func firstRange<C: Collection>(
+    of other: C
+  ) -> Range<Index>? where C.Element == Element {
     // TODO: Use a more efficient search algorithm
-    let searcher = ZSearcher<SubSequence>(pattern: Array(sequence), by: ==)
+    let searcher = ZSearcher<SubSequence>(pattern: Array(other), by: ==)
     return searcher.search(self[...], in: startIndex..<endIndex)
   }
 }
 
 extension BidirectionalCollection where Element: Comparable {
-  public func firstRange<S: Sequence>(
-    of other: S
-  ) -> Range<Index>? where S.Element == Element {
+  /// Finds and returns the range of the first occurrence of a given collection
+  /// within this collection.
+  ///
+  /// - Parameter other: The collection to search for.
+  /// - Returns: A range in the collection of the first occurrence of `sequence`.
+  /// Returns `nil` if `sequence` is not found.
+  @available(SwiftStdlib 5.7, *)
+  public func firstRange<C: Collection>(
+    of other: C
+  ) -> Range<Index>? where C.Element == Element {
     let searcher = PatternOrEmpty(
       searcher: TwoWaySearcher<SubSequence>(pattern: Array(other)))
     let slice = self[...]
@@ -56,11 +70,19 @@ extension BidirectionalCollection where Element: Comparable {
 // MARK: Regex algorithms
 
 extension BidirectionalCollection where SubSequence == Substring {
-  public func firstRange<R: RegexProtocol>(of regex: R) -> Range<Index>? {
-    firstRange(of: RegexConsumer(regex))
+  /// Finds and returns the range of the first occurrence of a given regex
+  /// within the collection.
+  /// - Parameter regex: The regex to search for.
+  /// - Returns: A range in the collection of the first occurrence of `regex`.
+  /// Returns `nil` if `regex` is not found.
+  @_disfavoredOverload
+  @available(SwiftStdlib 5.7, *)
+  public func firstRange(of regex: some RegexComponent) -> Range<Index>? {
+    _firstRange(of: RegexConsumer(regex))
   }
-  
-  public func lastRange<R: RegexProtocol>(of regex: R) -> Range<Index>? {
-    lastRange(of: RegexConsumer(regex))
+
+  @available(SwiftStdlib 5.7, *)
+  func _lastRange<R: RegexComponent>(of regex: R) -> Range<Index>? {
+    _lastRange(of: RegexConsumer(regex))
   }
 }

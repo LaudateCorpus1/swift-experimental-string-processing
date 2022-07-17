@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 import _StringProcessing
+import RegexBuilder
 
 /*
 
@@ -58,20 +59,20 @@ private func extractFromCaptures(
 }
 
 @inline(__always) // get rid of generic please
-private func graphemeBreakPropertyData<RP: RegexProtocol>(
+private func graphemeBreakPropertyData<RP: RegexComponent>(
   forLine line: String,
   using regex: RP
-) -> GraphemeBreakEntry? where RP.Match == (Substring, Substring, Substring?, Substring) {
-  line.match(regex).map(\.match).flatMap(extractFromCaptures)
+) -> GraphemeBreakEntry? where RP.RegexOutput == (Substring, Substring, Substring?, Substring) {
+  line.wholeMatch(of: regex).map(\.output).flatMap(extractFromCaptures)
 }
 
 private func graphemeBreakPropertyDataLiteral(
   forLine line: String
 ) -> GraphemeBreakEntry? {
-  return graphemeBreakPropertyData(
-    forLine: line,
-    using: r(#"([0-9A-F]+)(?:\.\.([0-9A-F]+))?\s+;\s+(\w+).*"#,
-             matching: (Substring, Substring, Substring?, Substring).self))
+  let regex = try! Regex(
+      #"([0-9A-F]+)(?:\.\.([0-9A-F]+))?\s+;\s+(\w+).*"#,
+    as: (Substring, Substring, Substring?, Substring).self)
+  return graphemeBreakPropertyData(forLine: line, using: regex)
 }
 
 // MARK: - Builder DSL
@@ -79,19 +80,19 @@ private func graphemeBreakPropertyDataLiteral(
 private func graphemeBreakPropertyData(
   forLine line: String
 ) -> GraphemeBreakEntry? {
-  line.match {
-    tryCapture(oneOrMore(.hexDigit)) { Unicode.Scalar(hex: $0) }
-    optionally {
+  line.wholeMatch {
+    TryCapture(OneOrMore(.hexDigit)) { Unicode.Scalar(hex: $0) }
+    Optionally {
       ".."
-      tryCapture(oneOrMore(.hexDigit)) { Unicode.Scalar(hex: $0) }
+      TryCapture(OneOrMore(.hexDigit)) { Unicode.Scalar(hex: $0) }
     }
-    oneOrMore(.whitespace)
+    OneOrMore(.whitespace)
     ";"
-    oneOrMore(.whitespace)
-    tryCapture(oneOrMore(.word)) { Unicode.GraphemeBreakProperty($0) }
-    zeroOrMore(.any)
+    OneOrMore(.whitespace)
+    TryCapture(OneOrMore(.word)) { Unicode.GraphemeBreakProperty($0) }
+    ZeroOrMore(.any)
   }.map {
-    let (_, lower, upper, property) = $0.match
+    let (_, lower, upper, property) = $0.output
     return GraphemeBreakEntry(lower...(upper ?? lower), property)
   }
 }

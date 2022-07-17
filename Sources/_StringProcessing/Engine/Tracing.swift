@@ -15,7 +15,7 @@ extension Processor: TracedProcessor {
 
   var currentPC: InstructionAddress { controller.pc }
 
-  public func formatSavePoints() -> String {
+  func formatSavePoints() -> String {
     if !savePoints.isEmpty {
       var result = "save points:\n"
       for point in savePoints {
@@ -54,7 +54,7 @@ extension Instruction.Payload: CustomStringConvertible {
 }
 
 extension Processor.SavePoint {
-  func describe(in input: Input) -> String {
+  func describe(in input: String) -> String {
     let posStr: String
     if let p = self.pos {
       posStr = "\(input.distance(from: input.startIndex, to: p))"

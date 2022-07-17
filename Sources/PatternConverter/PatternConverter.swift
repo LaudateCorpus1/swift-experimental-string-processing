@@ -12,8 +12,8 @@
 // swift run PatternConverter <regex>
 
 import ArgumentParser
-import _MatchingEngine
-import _StringProcessing
+import _RegexParser
+@_spi(PatternConverter) import _StringProcessing
 
 @main
 struct PatternConverter: ParsableCommand {
@@ -29,9 +29,6 @@ struct PatternConverter: ParsableCommand {
 
   @Flag(help: "Whether to show canonical regex literal")
   var showCanonical: Bool = false
-
-  @Flag(help: "Whether to show capture structure")
-  var showCaptureStructure: Bool = false
 
   @Flag(help: "Whether to skip result builder DSL")
   var skipDSL: Bool = false
@@ -52,9 +49,8 @@ struct PatternConverter: ParsableCommand {
     let delim = experimentalSyntax ? "|" : "/"
     print("Converting '\(delim)\(regex)\(delim)'")
 
-    let ast = try _MatchingEngine.parse(
-      regex,
-      experimentalSyntax ? .experimental : .traditional)
+    let ast = try _RegexParser.parse(
+      regex, experimentalSyntax ? .experimental : .traditional)
 
     // Show rendered source ranges
     if renderSourceRanges {
@@ -71,16 +67,10 @@ struct PatternConverter: ParsableCommand {
       print()
     }
 
-    if showCaptureStructure {
-      print("Capture structure:")
-      print()
-      print(ast.captureStructure)
-      print()
-    }
-
     print()
     if !skipDSL {
-      let render = ast.renderAsBuilderDSL(
+      let render = renderAsBuilderDSL(
+        ast: ast,
         maxTopDownLevels: topDownConversionLimit,
         minBottomUpLevels: bottomUpConversionLimit
       )
